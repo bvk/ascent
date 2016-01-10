@@ -211,13 +211,12 @@ func TestNetworkMessaging(test *testing.T) {
 			test.Errorf("could not send request to msn1: %v", err)
 			return
 		}
-		resHeader, resData, errRecv := msn2.Receive(reqHeader, time.Second)
+		resHeader, _, errRecv := msn2.Receive(reqHeader, time.Second)
 		if errRecv != nil {
 			test.Errorf("could not receive response from msn1: %v", errRecv)
 			return
 		}
-		logger.Infof("request [%s] [%s] -> response [%s] [%s]",
-			reqHeader, reqData, resHeader, resData)
+		logger.Infof("[%s] -> [%s]", reqHeader, resHeader)
 		if err := msn2.CloseMessage(reqHeader); err != nil {
 			test.Errorf("could not close request %s: %v", reqHeader, err)
 			return

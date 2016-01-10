@@ -160,6 +160,7 @@ func (this *SimpleController) NewToken(opName string, timeout time.Duration,
 		timeoutCh = time.After(timeout)
 	}
 
+	newCh := this.newCh
 	for {
 		select {
 		case <-this.closeCh:
@@ -168,7 +169,8 @@ func (this *SimpleController) NewToken(opName string, timeout time.Duration,
 		case <-timeoutCh:
 			return nil, errs.ErrTimeout
 
-		case this.newCh <- token:
+		case newCh <- token:
+			newCh = nil
 			continue
 
 		case status = <-token.resultCh:
