@@ -1,0 +1,92 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// This file defines rpc messages for the paxos/classic package.
+//
+
+package ascent.paxos.classic;
+option go_package = "classic";
+
+message PaxosMessage {
+  optional StatusRequest status_request = 1;
+  optional StatusResponse status_response = 2;
+  
+  optional ProposeRequest propose_request = 3;
+  optional ProposeResponse propose_response = 4;
+
+  optional Phase1Request phase1_request = 5;
+  optional Phase1Response phase1_response = 6;
+
+  optional Phase2Request phase2_request = 7;
+  optional Phase2Response phase2_response = 8;
+
+  optional LearnNotification learn_notification = 9;
+}
+
+message StatusRequest {
+}
+
+message StatusResponse {
+  optional bytes chosen_value = 1;
+  optional int64 voted_ballot = 2;
+  optional bytes voted_value = 3;
+
+  repeated string acceptor_list = 4;
+  repeated string proposer_list = 5;
+  repeated string learner_list = 6;
+}
+
+message ProposeRequest {
+  required bytes proposed_value = 1;
+}
+
+message ProposeResponse {
+  required bytes chosen_value = 1;
+}
+
+message Phase1Request {
+  required int64 ballot_number = 1;
+}
+
+message Phase1Response {
+  required int64 promised_ballot = 1;
+  optional int64 voted_ballot = 2;
+  optional bytes voted_value = 3;
+}
+
+message Phase2Request {
+  required int64 ballot_number = 1;
+  required bytes proposed_value = 2;
+}
+
+message Phase2Response {
+  required int64 promised_ballot = 1;
+  optional int64 voted_ballot = 2;
+  optional bytes voted_value = 3;
+}
+
+message LearnNotification {
+  optional bytes chosen_value = 1;
+  repeated BallotStatus ballot_status_list = 2;
+}
+
+message BallotStatus {
+  required int64 ballot_number = 1;
+  required bytes voted_value = 2;
+  repeated string acceptor_list = 3;
+}

@@ -1185,7 +1185,7 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 	}
 
 	// Close the token to release the resources.
-	this.ctlr.CloseToken(token)
+	token.ReleaseResources(peer.peerID)
 
 	// Open new transports if no open transports exist.
 	if len(transportList) == 0 {

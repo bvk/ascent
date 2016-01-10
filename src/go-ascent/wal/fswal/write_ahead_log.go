@@ -221,6 +221,8 @@ func (this *WriteAheadLog) Initialize(opts *Options,
 	}()
 
 	*this = lwal
+	this.writingChangesCond.L = &this.mutex
+	this.writingCheckpointsCond.L = &this.mutex
 	return nil
 }
 

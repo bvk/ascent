@@ -1,0 +1,83 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// This file defines wal record format for paxos/classic package.
+//
+
+import "proto-ascent/paxos/classic/rpc.proto";
+
+package ascent.paxos.classic;
+option go_package = "classic";
+
+message WALRecord {
+  optional Checkpoint checkpoint = 1;
+
+  optional Configuration config_change = 2;
+
+  optional Phase1Change phase1_change = 3;
+  optional Phase2Change phase2_change = 4;
+  optional BallotChange ballot_change = 5;
+  optional LearnerChange learner_change = 6;
+}
+
+message Checkpoint {
+  required Configuration configuration = 1;
+
+  // Proposer state.
+  optional int64 proposal_ballot = 2;
+
+  // Acceptor state.
+  optional int64 promised_ballot = 3;
+  optional int64 voted_ballot = 4;
+  optional bytes voted_value = 5;
+
+  // Learner state.
+  optional bytes chosen_value = 6;
+}
+
+message Configuration {
+  required string instance_id = 1;
+
+  repeated string learner_list = 2;
+  repeated string acceptor_list = 3;
+  repeated string proposer_list = 4;
+  optional int32 majority_size = 5;
+
+  optional bool is_learner = 6;
+  optional bool is_acceptor = 7;
+  optional bool is_proposer = 8;
+  optional int32 proposer_index = 9;
+}
+
+message Phase1Change {
+  required int64 promised_ballot = 1;
+}
+
+message Phase2Change {
+  required int64 voted_ballot = 1;
+  required bytes voted_value = 2;
+}
+
+message BallotChange {
+  required int64 proposal_ballot = 1;
+}
+
+message LearnerChange {
+  optional bytes ChosenValue = 1;
+  repeated BallotStatus ballot_status_list = 2;
+}

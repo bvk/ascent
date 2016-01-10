@@ -72,8 +72,6 @@ type BasicController struct {
 	// Mutex to protect access to the following variables.
 	mutex sync.Mutex
 
-	liveMap map[string]struct{}
-
 	// Timeout control channels for full lock waiters.
 	timerMap map[chan time.Time]struct{}
 
@@ -86,7 +84,6 @@ type BasicController struct {
 
 // Initialize initializes the controller.
 func (this *BasicController) Initialize(logger log.Logger) {
-	this.liveMap = make(map[string]struct{})
 	this.timerMap = make(map[chan time.Time]struct{})
 	this.closeCh = make(chan struct{})
 	this.resourcer.Initialize(logger)
@@ -172,7 +169,6 @@ func (this *BasicController) NewToken(name string, timeoutCh <-chan time.Time,
 		return nil, status
 	}
 
-	this.liveMap[name] = struct{}{}
 	return token, nil
 }
 
@@ -183,7 +179,6 @@ func (this *BasicController) CloseToken(token *BasicToken) {
 	}
 
 	this.wg.Done()
-	delete(this.liveMap, token.name)
 
 	if token.fullLock != nil {
 		token.fullLock.Unlock()
@@ -206,13 +201,19 @@ func (this *BasicToken) ReleaseResources(resourceList ...string) {
 
 // ReadLock acquires resources for read-only access. This method can be used
 // even after the controller is closed.
-func (this *BasicController) ReadLock(resourceList ...string) *ResourceLock {
-	if resourceList == nil {
-		panic("TODO: Implement ReadLockAll, until then, we just panic")
-	}
+func (this *BasicController) ReadLock(first string,
+	rest ...string) *ResourceLock {
 
-	readList := make([]string, len(resourceList)+1)
+	readList := make([]string, len(rest)+2)
 	readList[0] = ""
-	copy(readList[1:], resourceList)
+	readList[1] = first
+	copy(readList[2:], rest)
 	return this.resourcer.LockResources(readList...)
+}
+
+// ReadLockAll acquires all resources for read-only access. This method can be
+// used even after the controller is closed.
+func (this *BasicController) ReadLockAll() *FullLock {
+	// TODO: Implement read/write full locks.
+	return this.resourcer.LockAll()
 }
