@@ -24,6 +24,10 @@ package errs
 
 import (
 	"fmt"
+
+	"github.com/golang/protobuf/proto"
+
+	thispb "proto-ascent/base/errs"
 )
 
 // SimpleError type implements serializable errors.
@@ -37,7 +41,17 @@ func (this *SimpleError) Error() string {
 	if this.Message == nil {
 		return this.Category
 	}
+	if this.Category == "" {
+		return *this.Message
+	}
 	return fmt.Sprintf("%s{%s}", this.Category, *this.Message)
+}
+
+func (this *SimpleError) toProto() *thispb.Error {
+	errProto := &thispb.Error{}
+	errProto.Category = proto.String(this.Category)
+	errProto.Message = this.Message
+	return errProto
 }
 
 func (this *SimpleError) newErrorf(format string,
@@ -60,5 +74,3 @@ func (this *SimpleError) isSimilar(err error) bool {
 	}
 	return false
 }
-
-// TODO: Add encoder and decoder functionality.

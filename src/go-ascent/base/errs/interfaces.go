@@ -21,6 +21,14 @@
 
 package errs
 
+import (
+	"fmt"
+
+	"github.com/golang/protobuf/proto"
+
+	thispb "proto-ascent/base/errs"
+)
+
 // Errors interface defines pre-defined errors. They also serve as error
 // categories when users choose to create errors with custom messages if
 // necessary.
@@ -52,6 +60,35 @@ func IsTimeout(err error) bool  { return ErrTimeout.isSimilar(err) }
 func IsClosed(err error) bool   { return ErrClosed.isSimilar(err) }
 func IsOverflow(err error) bool { return ErrOverflow.isSimilar(err) }
 func IsCorrupt(err error) bool  { return ErrCorrupt.isSimilar(err) }
+
+// MakeErrorFromCategory creates an error object from the name of error
+// category.
+func MakeErrorFromCategory(category string) *SimpleError {
+	switch category {
+	case "":
+		return nil
+	case "ErrInvalid":
+		return ErrInvalid
+	case "ErrExist":
+		return ErrExist
+	case "ErrNotExist":
+		return ErrNotExist
+	case "ErrRetry":
+		return ErrRetry
+	case "ErrIOError":
+		return ErrIOError
+	case "ErrTimeout":
+		return ErrTimeout
+	case "ErrClosed":
+		return ErrClosed
+	case "ErrOverflow":
+		return ErrOverflow
+	case "ErrCorrupt":
+		return ErrCorrupt
+	default:
+		panic(fmt.Sprint("unknown error category: %s", category))
+	}
+}
 
 // New* functions create an error of a specific category with user defined
 // message.
@@ -96,4 +133,41 @@ func NewErrorf(category *SimpleError, format string,
 // etc. functions.
 func MergeErrors(errFirst error, rest ...error) error {
 	return NewErrorList(errFirst, rest...)
+}
+
+// MakeErrorFromProto creates an error object from its protobuf representation.
+func MakeErrorFromProto(errProto *thispb.Error) error {
+	if errProto.Category == nil {
+		if errProto.Message == nil {
+			return nil
+		}
+		return fmt.Errorf("%s", *errProto.Message)
+	}
+	errCategory := MakeErrorFromCategory(*errProto.Category)
+	if errProto.Message == nil {
+		return errCategory
+	}
+	return errCategory.newErrorf("%s", *errProto.Message)
+}
+
+// MakeProtoFromError converts an error object into its protobuf
+// representation.
+func MakeProtoFromError(err error) *thispb.Error {
+	if err == nil {
+		return nil
+	}
+	if simple, ok := err.(*SimpleError); ok {
+		return simple.toProto()
+	}
+	if errList, ok := err.(*ErrorList); ok {
+		return errList.toProto()
+	}
+	errProto := &thispb.Error{}
+	errProto.Message = proto.String(err.Error())
+	return errProto
+}
+
+// AreEqual test if two errors are the same.
+func AreEqual(errOne, errTwo error) bool {
+	return errOne.Error() == errTwo.Error()
 }

@@ -22,35 +22,58 @@
 package errs
 
 import (
+	"os"
 	"testing"
 )
 
-func TestSimpleError(t *testing.T) {
+func TestSimpleError(test *testing.T) {
 	if !IsInvalid(ErrInvalid) {
-		t.Errorf("IsInvalid(ErrInvalid) is not true")
+		test.Errorf("IsInvalid(ErrInvalid) is not true")
 	}
 	if !IsExist(ErrExist) {
-		t.Errorf("IsExist(ErrExist) is not true")
+		test.Errorf("IsExist(ErrExist) is not true")
 	}
 	if !IsNotExist(ErrNotExist) {
-		t.Errorf("IsNotExist(ErrNotExist) is not true")
+		test.Errorf("IsNotExist(ErrNotExist) is not true")
 	}
 	if !IsRetry(ErrRetry) {
-		t.Errorf("IsRetry(ErrRetry) is not true")
+		test.Errorf("IsRetry(ErrRetry) is not true")
 	}
 	if !IsIOError(ErrIOError) {
-		t.Errorf("IsIOError(ErrIOError) is not true")
+		test.Errorf("IsIOError(ErrIOError) is not true")
 	}
 	if !IsTimeout(ErrTimeout) {
-		t.Errorf("IsTimeout(ErrTimeout) is not ture")
+		test.Errorf("IsTimeout(ErrTimeout) is not ture")
 	}
 
 	err1 := NewErrorf(ErrInvalid, "int %d rune %c string %s", 10, 'x', "message")
 	if !IsInvalid(err1) {
-		t.Errorf("custom error %v is not classified into proper category", err1)
+		test.Errorf("custom error %v is not classified into proper category", err1)
 	}
 	if err1.Error() != "ErrInvalid{int 10 rune x string message}" {
-		t.Errorf("custom error message for [%v] is in expected format", err1)
+		test.Errorf("custom error message for [%v] is in expected format", err1)
+	}
+
+	//
+	// Protobuf conversion tests
+	//
+
+	errInvalidProto := MakeProtoFromError(ErrInvalid)
+	if !IsInvalid(MakeErrorFromProto(errInvalidProto)) {
+		test.Errorf("couldn't convert ErrInvalid into proto format")
+	}
+
+	errMerge := MergeErrors(ErrRetry, ErrTimeout)
+	errRetryProto := MakeProtoFromError(errMerge)
+	if !IsRetry(MakeErrorFromProto(errRetryProto)) {
+		test.Errorf("couldn't convert ErrRetry merged with some other error " +
+			"into proto format")
+	}
+
+	errOSErrorProto := MakeProtoFromError(os.ErrExist)
+	osError := MakeErrorFromProto(errOSErrorProto)
+	if !AreEqual(osError, os.ErrExist) {
+		test.Errorf("could not convert os.ErrExist into proto format")
 	}
 
 	//
@@ -59,6 +82,6 @@ func TestSimpleError(t *testing.T) {
 
 	aa := MergeErrors(ErrInvalid, ErrExist, ErrNotExist)
 	if !IsInvalid(aa) {
-		t.Errorf("MergeErrors(ErrInvalid, ...) doesn't satisfy IsInvalid")
+		test.Errorf("MergeErrors(ErrInvalid, ...) doesn't satisfy IsInvalid")
 	}
 }

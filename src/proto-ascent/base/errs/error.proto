@@ -1,0 +1,33 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// This file defines protobuf type for errors.
+//
+
+package ascent.base.errs;
+option go_package = "errs";
+
+message Error {
+  // Error category for the error. It can be empty for system errors
+  // or errors from other libraries.
+  optional string category = 1;
+
+  // User defined error message for the standard errors or the string
+  // representation for errors from other libraries.
+  optional string message = 2;
+}

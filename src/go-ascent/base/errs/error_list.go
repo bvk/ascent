@@ -24,6 +24,8 @@ package errs
 
 import (
 	"fmt"
+
+	thispb "proto-ascent/base/errs"
 )
 
 type ErrorList struct {
@@ -65,4 +67,8 @@ func (this *ErrorList) Error() string {
 	return fmt.Sprint(this.errList)
 }
 
-// TODO: Add encoder and decoder functionality.
+// toProto converts an error list into a protobuf object.
+func (this *ErrorList) toProto() *thispb.Error {
+	// TODO: Fix this to include all errors in the list.
+	return MakeProtoFromError(this.errList[0])
+}
