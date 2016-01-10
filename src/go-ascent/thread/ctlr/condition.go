@@ -34,6 +34,8 @@ package ctlr
 import (
 	"sync"
 	"time"
+
+	"go-ascent/base/errs"
 )
 
 // Condition implements the condition variable.
@@ -54,23 +56,25 @@ func (this *Condition) Initialize(locker sync.Locker) {
 // WaitTimeout blocks the caller for specified time for a signal. Caller is
 // required to hold the lock before calling this function.
 //
-// timeout: Maximum amount of time to wait for the signal.
+// timeoutCh: A timeout channel to signal timeout or close.
 //
-// Returns true if wake up was due to a signal; returns false otherwise.
-func (this *Condition) WaitTimeout(timeout time.Duration) bool {
-	timeoutCh := time.After(timeout)
-	signaled := true
-
+// Returns nil if wake up was due to a signal; returns ErrTimeout or ErrClosed
+// otherwise.
+func (this *Condition) WaitTimeout(timeoutCh <-chan time.Time) (status error) {
 	signalCh := this.signalCh
 	this.locker.Unlock()
 	select {
-	case <-timeoutCh:
-		signaled = false
+	case time := <-timeoutCh:
+		if time.IsZero() {
+			status = errs.ErrClosed
+		} else {
+			status = errs.ErrTimeout
+		}
 	case <-signalCh:
 	}
 	this.locker.Lock()
 
-	return signaled
+	return status
 }
 
 // Wait blocks the caller for a signal. Caller is required to hold the lock

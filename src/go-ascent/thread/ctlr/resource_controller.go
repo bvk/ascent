@@ -51,7 +51,6 @@
 package ctlr
 
 import (
-	"math"
 	"sync"
 	"time"
 
@@ -104,7 +103,8 @@ func (this *ResourceController) Initialize(logger log.Logger) {
 
 // LockAll obtains write lock on all resources.
 func (this *ResourceController) LockAll() *FullLock {
-	return this.TimeLockAll(math.MaxInt64)
+	lock, _ := this.TimeLockAll(nil)
+	return lock
 }
 
 // LockResources obtains read/write locks on the given resources. Resources are
@@ -112,12 +112,15 @@ func (this *ResourceController) LockAll() *FullLock {
 func (this *ResourceController) LockResources(
 	resourceList ...string) *ResourceLock {
 
-	return this.TimeLockResources(math.MaxInt64, resourceList...)
+	lock, _ := this.TimeLockResources(nil, resourceList...)
+	return lock
 }
 
 // TimeLockAll tries to obtain write lock on all resources in a given time
 // limit.
-func (this *ResourceController) TimeLockAll(timeout time.Duration) *FullLock {
+func (this *ResourceController) TimeLockAll(timeoutCh <-chan time.Time) (
+	*FullLock, error) {
+
 	lock := &FullLock{owner: this}
 	lock.cond.Initialize(&this.mutex)
 
@@ -131,19 +134,19 @@ func (this *ResourceController) TimeLockAll(timeout time.Duration) *FullLock {
 		if len(this.waitingList) == 1 {
 			if lock.ready() {
 				lock.issue()
-				return lock
+				return lock, nil
 			}
-			if !lock.cond.WaitTimeout(timeout) {
-				return nil
+			if err := lock.cond.WaitTimeout(timeoutCh); err != nil {
+				return nil, err
 			}
-			return lock
+			return lock, nil
 		}
 	}
 }
 
 // TimeLockResources tries to obtain the resource lock in a given time limit.
-func (this *ResourceController) TimeLockResources(timeout time.Duration,
-	resourceList ...string) *ResourceLock {
+func (this *ResourceController) TimeLockResources(timeoutCh <-chan time.Time,
+	resourceList ...string) (*ResourceLock, error) {
 
 	// Split resources into readList and writeList based on separator.
 	var writeList []string
@@ -176,13 +179,13 @@ func (this *ResourceController) TimeLockResources(timeout time.Duration,
 		if len(this.waitingList) == 1 {
 			if lock.ready() {
 				lock.issue()
-				return lock
+				return lock, nil
 			}
 		}
-		if !lock.cond.WaitTimeout(timeout) {
-			return nil
+		if err := lock.cond.WaitTimeout(timeoutCh); err != nil {
+			return nil, err
 		}
-		return lock
+		return lock, nil
 	}
 }
 

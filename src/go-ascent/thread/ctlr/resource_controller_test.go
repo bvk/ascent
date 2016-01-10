@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"go-ascent/base/errs"
 	"go-ascent/base/log"
 )
 
@@ -44,12 +45,14 @@ func TestResourceController(test *testing.T) {
 	foo := controller.LockResources("foo")
 	bar := controller.LockResources("bar")
 
-	if xx := controller.TimeLockResources(time.Millisecond, "foo"); xx != nil {
+	timeoutCh := time.After(time.Millisecond)
+	if _, err := controller.TimeLockResources(timeoutCh, "foo"); err == nil {
 		test.Errorf("resource foo is issued multiple times")
 		return
 	}
 
-	if xx := controller.TimeLockAll(time.Millisecond); xx != nil {
+	timeoutCh = time.After(time.Millisecond)
+	if _, err := controller.TimeLockAll(timeoutCh); err == nil {
 		test.Errorf("lock all issued when foo and bar are busy")
 		return
 	}
@@ -70,14 +73,28 @@ func TestResourceController(test *testing.T) {
 
 	a1 := controller.LockResources("", "aa")
 	a2 := controller.LockResources("", "aa")
-	if a3 := controller.TimeLockAll(time.Millisecond); a3 != nil {
+
+	timeoutCh = time.After(time.Millisecond)
+	if _, err := controller.TimeLockAll(timeoutCh); err == nil {
 		test.Errorf("lock all issued when two readers are sharing aa")
 		return
 	}
-	if a4 := controller.TimeLockResources(time.Millisecond, "aa"); a4 != nil {
+	timeoutCh = time.After(time.Millisecond)
+	if _, err := controller.TimeLockResources(timeoutCh, "aa"); err == nil {
 		test.Errorf("exclusive lock is issued when two readers have aa")
 		return
 	}
 	a1.Unlock()
 	a2.Unlock()
+
+	// A close on the timeout channel must unlock the waiters.
+
+	b1 := controller.LockAll()
+	timeoutCh2 := make(chan time.Time)
+	close(timeoutCh2)
+	if _, err := controller.TimeLockAll(timeoutCh2); !errs.IsClosed(err) {
+		test.Errorf("closing timeout channel did not unblock the lock")
+		return
+	}
+	b1.Unlock()
 }
