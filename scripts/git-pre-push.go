@@ -56,7 +56,7 @@ func main() {
 
 	// Multiple commits can be sent in one push, so figure out the uncommited
 	// commits.
-	shalistCmd := exec.Command("git", "log", `--format=%H`,
+	shalistCmd := exec.Command("git", "log", "--no-merges", `--format=%H`,
 		fmt.Sprintf("%s..%s", remoteSha, localSha))
 	stdout, errShalist := shalistCmd.Output()
 	if errShalist != nil {
@@ -100,6 +100,7 @@ func CheckCommitMessage(sha, commit string) []error {
 	reviewersRe := regexp.MustCompile(`^\s*Reviewers\s+:\s*\S+.*$`)
 	testsRe := regexp.MustCompile(`^\s*Tests Run\s+:.*$`)
 	ticketsRe := regexp.MustCompile(`^\s*Tickets Resolved\s+:.*$`)
+	subtreeRe := regexp.MustCompile(`^\s*git-subtree-.*$`)
 
 	reviewers, tests, tickets := 0, 0, 0
 	reviewersLine, testsLine, ticketsLine := -1, -1, -1
@@ -108,6 +109,9 @@ func CheckCommitMessage(sha, commit string) []error {
 	lines := strings.Split(commit, "\n")
 	for ii, line := range lines {
 		switch {
+		case subtreeRe.MatchString(line):
+			// Ignore git-subtree commits.
+			return nil
 		case reviewersRe.MatchString(line):
 			reviewers++
 			reviewersLine = ii
