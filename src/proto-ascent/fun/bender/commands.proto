@@ -16,41 +16,12 @@
 // along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
 
 //
-// A toy program for testing purposes.
+// A simple protobuf to check integration with the build system.
 //
 
-package main
+package ascent.fun.bender;
+option go_package = "bender";
 
-import (
-	"fmt"
-	"log"
-
-	"github.com/golang/protobuf/proto"
-
-	"proto-ascent/fun/bender"
-)
-
-func main() {
-	protoMain()
-	fmt.Println("Hello Meatbags!")
-}
-
-func protoMain() {
-	cmd := &bender.BenderCommand{
-		CommandName: proto.String("hello"),
-	}
-	data, err := proto.Marshal(cmd)
-	if err != nil {
-		log.Fatal("marshaling error: ", err)
-	}
-	newCmd := &bender.BenderCommand{}
-	err = proto.Unmarshal(data, newCmd)
-	if err != nil {
-		log.Fatal("unmarshaling error: ", err)
-	}
-	// Now test and newTest contain the same data.
-	if cmd.GetCommandName() != newCmd.GetCommandName() {
-		log.Fatalf("data mismatch %q != %q", cmd.GetCommandName(),
-			newCmd.GetCommandName())
-	}
+message BenderCommand {
+  required string command_name = 1;
 }

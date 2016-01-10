@@ -16,7 +16,8 @@
 # along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
 
 AC_INIT([ascent], [0.1])
-AM_INIT_AUTOMAKE([foreign no-dist subdir-objects])
+AM_INIT_AUTOMAKE([foreign no-dist no-dependencies subdir-objects])
+AM_SILENT_RULES([yes])
 AC_PROG_CC
 AC_PROG_CXX
 AC_PROG_RANLIB

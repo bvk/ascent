@@ -36,9 +36,12 @@ go-env:
 # make-check. Users can use GOTESTFLAGS variable to pass command line
 # options to the 'go test' command. GOTESTFLAGS name is picked to be
 # similar to CFLAGS, CPPFLAGS, etc.
-check-local:
+go-check-local:
 	go test $(GOTESTFLAGS) go-ascent/...
 
-# Build rule to compile all Go packages and binaries as part of make.
-all-local:
+# Build rule to compile all Go packages and binaries as part of make. Since go
+# compiler takes care of dependency analysis, we always run go install.
+go-all-local: proto-go-all-local
 	go install $(GOFLAGS) go-ascent/...
+
+.PHONY: go-env go-check-local go-all-local

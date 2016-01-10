@@ -19,5 +19,14 @@
 # Make/Automake variables and rules for C++ sources.
 #
 
-AM_CXXFLAGS = -std=c++1z
-AM_CPPFLAGS = -I$(abs_top_srcdir)/src
+AM_CXXFLAGS = -std=c++14
+AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_srcdir)/src/gen-cc
+AM_LDFLAGS = -lprotobuf
+
+bin_PROGRAMS = zoidberg
+zoidberg_SOURCES = src/cc-ascent/fun/zoidberg/main.cc
+zoidberg_LDADD = liballproto.a
+
+cc-check-local:
+cc-all-local:
+.PHONY: cc-check-local cc-all-local

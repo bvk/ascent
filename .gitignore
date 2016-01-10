@@ -3,6 +3,7 @@
 **.o
 **/.deps
 **/.dirstamp
+**/*.pb.go
 depcomp
 Makefile
 Makefile.in
@@ -16,3 +17,4 @@ install-sh
 missing
 bin
 pkg
+src/gen-cc/*

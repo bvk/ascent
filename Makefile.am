@@ -23,13 +23,13 @@
 include makefiles/Makefile.git
 
 # Users can define custom targets and variables for their personal use by
-# defining Makefile.usr file in the parent directory of $(abs_top_srcdir). Some
+# defining Makefile.usr file in the parent directory of $(top_srcdir). Some
 # variables can be used to influence the build itself, like, for example,
 # selecting a different build server, etc.
 #
 # This file resides outside the git repository and not all engineers may need
 # it, so it is completely optional.
--include $(abs_top_srcdir)/../Makefile.usr
+-include $(top_srcdir)/../Makefile.usr
 
 # Variables to keep track of build environment.
 export BUILD_DATE ?= $(shell date --rfc-3339=ns)
@@ -38,13 +38,16 @@ export BUILD_USER ?= $(shell whoami)
 
 # CLEANFILES and CLEANDIRS variables hold names of additional files and
 # directories that would be deleted on make-clean.
-CLEANFILES :=
-CLEANDIRS := $(abs_top_srcdir)/bin
+CLEANFILES =
+CLEANDIRS = $(top_srcdir)/bin
 
 clean-local:
-	for xx in $(CLEANFILES); do test -z $$xx || rm $$xx; done
-	for xx in $(CLEANDIRS); do test -z $$xx || rm -rf $$xx; done
+	test -z "$(CLEANDIRS)" || rm -rf $(CLEANDIRS)
+
+all-local: proto-all-local go-all-local cc-all-local
+check-local: go-check-local cc-check-local
 
 # Make (and Automake) rules specific to each language sources.
+include makefiles/Makefile.proto.am
 include makefiles/Makefile.go.am
 include makefiles/Makefile.cc.am

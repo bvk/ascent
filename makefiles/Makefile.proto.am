@@ -1,0 +1,78 @@
+# Copyright (c) 2016 BVK Chaitanya
+#
+# This file is part of the Ascent Library.
+#
+# The Ascent Library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# The Ascent Library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+#
+# Make/Automake variables and rules for Protobuf files.
+#
+
+PROTO_DIRS =
+PROTO_DIRS += $(top_srcdir)/src/proto-ascent/fun/bender
+
+
+PROTO_FILES = $(foreach dir,$(PROTO_DIRS),$(wildcard $(dir)/*.proto))
+proto-all-local: proto-go-all-local proto-cc-all-local
+.PHONY: proto-all-local
+
+#
+# Rules for building Go packages from the protobufs files.
+#
+
+# Build Go source generator if it doesn't exist.
+$(top_srcdir)/bin/protoc-gen-go:
+	go install github.com/golang/protobuf/protoc-gen-go
+CLEANFILES += $(top_srcdir)/bin/protoc-gen-go
+
+# Use the Go source generator to create Go sources from proto files.
+%.pb.go: %.proto $(top_srcdir)/bin/protoc-gen-go
+	PATH=$$PATH:$(top_srcdir)/bin protoc --go_out=. $<
+PROTO_GO_FILES = $(subst .proto,.pb.go,$(PROTO_FILES))
+CLEANFILES += $(PROTO_GO_FILES)
+
+# Each directory with protobuf files turns into one package.
+$(top_srcdir)/pkg/linux_amd64/%.a: $(top_srcdir)/src/%/*.pb.go
+	go install $*
+PROTO_GO_PKGS = $(subst /src/,/pkg/linux_amd64/,$(addsuffix .a,$(PROTO_DIRS)))
+CLEANFILES += $(PROTO_GO_PKGS)
+
+# Build Go packages for all proto files.
+proto-go-all-local: $(PROTO_GO_PKGS)
+.PHONY: proto-go-all-local
+
+#
+# Rules for building C++ packages from the protobuf files.
+#
+
+# Rule to generate pb.h and pb.cc files from
+$(top_srcdir)/src/gen-cc/%.pb.cc $(top_srcdir)/src/gen-cc/%.pb.h: $(top_srcdir)/src/%.proto
+	mkdir -p $(top_srcdir)/src/gen-cc
+	cd $(top_srcdir)/src && protoc --cpp_out=$(abs_top_srcdir)/src/gen-cc/. $*.proto
+PROTO_PB_CC_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.cc,$(PROTO_FILES)))
+PROTO_PB_H_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.h,$(PROTO_FILES)))
+PROTO_PB_O_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.o,$(PROTO_FILES)))
+BUILT_SOURCES = $(PROTO_PB_CC_FILES) $(PROTO_PB_H_FILES)
+CLEANFILES += $(PROTO_PB_CC_FILES) $(PROTO_PB_H_FILES) $(PROTO_PB_O_FILES)
+CLEANDIRS += $(top_srcdir)/src/gen-cc
+
+# Since file list is automatically generated, we cannot rely on _SOURCE. So, we
+# use _LIBADD instead.
+pkglib_LIBRARIES = liballproto.a
+liballproto_a_SOURCES =
+liballproto_a_LIBADD = $(PROTO_PB_O_FILES)
+
+# Build C++ packages for all proto files.
+proto-cc-all-local: $(PROTO_PB_CC_FILES) $(PROTO_PB_H_FILES)
+.PHONY: proto-cc-all-local
