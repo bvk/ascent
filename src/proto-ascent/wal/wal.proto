@@ -1,0 +1,41 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// Protobuf definitions for the ascent/wal library.
+//
+
+package ascent.wal;
+option go_package = "wal";
+
+message RecordHeader {
+  // WAL record type.
+  //
+  // In addition to Change and Checkpoint records, WAL implementations
+  // may use special, control records in implementing wal operations
+  // like, begin checkpoint, end checkpoint, etc.
+  enum RecordType {
+    CHANGE = 0;
+    CHECKPOINT = 1;
+    BEGIN_CHECKPOINT = 2;
+    END_CHECKPOINT = 3;
+  }
+  required RecordType type = 1;
+
+  // Checksum bytes for the user data.
+  required bytes checksum = 2;
+}
