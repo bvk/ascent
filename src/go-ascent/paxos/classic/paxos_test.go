@@ -29,13 +29,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/proto"
-
 	"go-ascent/base/log"
 	"go-ascent/msg/simple"
 	"go-ascent/wal/fswal"
-
-	thispb "proto-ascent/paxos/classic"
 )
 
 func TestClassicPaxosConsensus(test *testing.T) {
@@ -124,7 +120,8 @@ func TestClassicPaxosConsensus(test *testing.T) {
 			return nil
 		}
 
-		errRegister := msn1.RegisterClass("paxos/classic", paxos1, PaxosRPCList...)
+		rpcList := PaxosRPCList()
+		errRegister := msn1.RegisterClass("paxos/classic", paxos1, rpcList...)
 		if errRegister != nil {
 			test.Errorf("could not export paxos instance rpcs: %v", errRegister)
 			return nil
@@ -174,7 +171,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 
 	configureAgents := func(this *Agent,
 		proposers, acceptors, learners []string) {
-		errConfig := this.paxos.ConfigureAgents(proposers, acceptors, learners)
+		errConfig := this.paxos.Configure(proposers, acceptors, learners)
 		if errConfig != nil {
 			test.Errorf("could not configure paxos on %s: %v", this.name,
 				errConfig)
@@ -190,51 +187,16 @@ func TestClassicPaxosConsensus(test *testing.T) {
 	propose := func(client *Agent, proposer *Agent, value string) {
 		defer func() { doneCh <- struct{}{} }()
 
-		request := thispb.ProposeRequest{}
-		request.ProposedValue = []byte(value)
-		reqMessage := thispb.PaxosMessage{}
-		reqMessage.ProposeRequest = &request
-		reqData, errMarshal := proto.Marshal(&reqMessage)
-		if errMarshal != nil {
-			test.Errorf("could not marshal propose message: %v", &reqMessage)
-			return
-		}
-
 		start := time.Now()
-		reqHeader := client.msn.NewRequest("paxos/classic", "test",
-			"ClassicPaxosPropose")
-		if err := client.msn.Send(proposer.name, reqHeader, reqData); err != nil {
-			test.Errorf("could not send propose request to %s from %s: %v",
-				proposer.name, client.name, err)
+		chosen, errProp := client.paxos.Propose([]byte(value), time.Second)
+		if errProp != nil {
+			test.Errorf("could not propose value %s: %v", value, errProp)
 			return
 		}
-		defer client.msn.CloseMessage(reqHeader)
-
-		resHeader, resData, errRecv := client.msn.Receive(reqHeader,
-			10*time.Second)
-		if errRecv != nil {
-			test.Errorf("could not receive propose response at client %s: %v",
-				client.name, errRecv)
-			return
-		}
-
-		resMessage := thispb.PaxosMessage{}
-		if err := proto.Unmarshal(resData, &resMessage); err != nil {
-			test.Errorf("could not parse propose response: %v", err)
-			return
-		}
-
-		if resMessage.ProposeResponse == nil {
-			test.Errorf("propose response %s from %s is empty",
-				resHeader, resHeader.GetMessengerId())
-			return
-		}
-		response := resMessage.GetProposeResponse()
 
 		test.Logf("classic paxos consensus took %v time to choose %s for %s",
-			time.Since(start), response.ChosenValue, client.name)
-		client.chosen = response.ChosenValue
-
+			time.Since(start), chosen, client.name)
+		client.chosen = chosen
 	}
 	go propose(agent1, agent2, "agent1")
 	go propose(agent2, agent3, "agent2")
@@ -252,8 +214,8 @@ func TestClassicPaxosConsensus(test *testing.T) {
 	}
 
 	closeAgent := func(agent *Agent) {
-		errUnregister := agent.msn.UnregisterClass("paxos/classic",
-			PaxosRPCList...)
+		rpcList := PaxosRPCList()
+		errUnregister := agent.msn.UnregisterClass("paxos/classic", rpcList...)
 		if errUnregister != nil {
 			test.Errorf("could not unregister paxos instance exports: %v",
 				errUnregister)

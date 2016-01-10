@@ -27,7 +27,9 @@ package classic
 
 import (
 	"bytes"
+	"math/rand"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -108,13 +110,15 @@ type Paxos struct {
 
 	// Globally unique id for the consensus instance. All nodes participating in
 	// a consensus share the same uid.
-	uid       string
+	uid string
+
+	// Network RPC namespace for this instance.
 	namespace string
 
-	// Classic paxos roles for this object.
-	isLearner  bool
-	isAcceptor bool
-	isProposer bool
+	// Atomic variables indicating the classic paxos roles for this object.
+	isLearner  int32
+	isAcceptor int32
+	isProposer int32
 
 	// All nodes participating in the consensus as per their roles.
 	learnerList  []string
@@ -150,10 +154,12 @@ type Paxos struct {
 	ballotAcceptorsMap map[int64]map[string]struct{}
 }
 
-// List of rpcs handled by classic paxos objects.
-var PaxosRPCList = []string{
-	"ClassicPaxosPropose", "ClassicPaxosPhase1", "ClassicPaxosPhase2",
-	"ClassicPaxosLearn",
+// PaxosRPCList returns list of rpcs handled by classic paxos objects.
+func PaxosRPCList() []string {
+	return []string{
+		"ClassicPaxos.Propose", "ClassicPaxos.Phase1", "ClassicPaxos.Phase2",
+		"ClassicPaxos.Learn",
+	}
 }
 
 // Initialize initializes a classic paxos instance.
@@ -187,10 +193,11 @@ func (this *Paxos) Initialize(opts *Options, namespace, uid string,
 	this.promisedBallot = -1
 	this.votedBallot = -1
 	this.majoritySize = -1
+	this.proposalBallot = -1
 	this.ballotValueMap = make(map[int64][]byte)
 	this.ballotAcceptorsMap = make(map[int64]map[string]struct{})
+
 	this.Logger = this.NewLogger("classic-paxos:%s-%s", uid, this.msn.UID())
-	this.ctlr.Logger = this
 	this.ctlr.Initialize(this)
 	return nil
 }
@@ -209,11 +216,10 @@ func (this *Paxos) Close() (status error) {
 	return status
 }
 
-// ConfigureAgents initializes the paxos agent configuration. Since classic
-// paxos doesn't support reconfiguration, this operation can be performed only
-// once. Also, as part of configuration, this instance must be handling at
-// least one type of agent role.
-func (this *Paxos) ConfigureAgents(proposerList, acceptorList,
+// Configure initializes the paxos agent configuration. Since classic paxos
+// doesn't support reconfiguration, this operation can be performed only
+// once.
+func (this *Paxos) Configure(proposerList, acceptorList,
 	learnerList []string) error {
 
 	token, errToken := this.ctlr.NewToken("ConfigureAgents", nil /* timeout */)
@@ -222,7 +228,7 @@ func (this *Paxos) ConfigureAgents(proposerList, acceptorList,
 	}
 	defer this.ctlr.CloseToken(token)
 
-	if this.isLearner || this.isAcceptor || this.isProposer {
+	if len(this.proposerList) > 0 {
 		this.Errorf("paxos instance is already configured")
 		return errs.ErrExist
 	}
@@ -269,14 +275,6 @@ func (this *Paxos) ConfigureAgents(proposerList, acceptorList,
 		}
 	}
 
-	// This instance must be in at least one set, otherwise, configuration is
-	// invalid.
-	if !isLearner && !isProposer && !isAcceptor {
-		this.Errorf("invalid configuration because this paxos instance doesn't " +
-			"have any role")
-		return errs.ErrInvalid
-	}
-
 	// Save configuration in the wal.
 	config := thispb.Configuration{}
 	config.InstanceId = proto.String(this.uid)
@@ -285,15 +283,16 @@ func (this *Paxos) ConfigureAgents(proposerList, acceptorList,
 	config.AcceptorList = acceptors
 	config.MajoritySize = proto.Int32(int32(majoritySize))
 	if isLearner {
-		config.IsLearner = proto.Bool(isLearner)
+		config.IsLearner = proto.Bool(true)
 	}
 	if isAcceptor {
-		config.IsAcceptor = proto.Bool(isAcceptor)
+		config.IsAcceptor = proto.Bool(true)
 	}
 	if isProposer {
-		config.IsProposer = proto.Bool(isProposer)
+		config.IsProposer = proto.Bool(true)
 		config.ProposerIndex = proto.Int32(int32(proposerIndex))
 	}
+
 	walRecord := thispb.WALRecord{}
 	walRecord.ConfigChange = &config
 	data, errMarshal := proto.Marshal(&walRecord)
@@ -307,17 +306,9 @@ func (this *Paxos) ConfigureAgents(proposerList, acceptorList,
 		return err
 	}
 
-	this.isLearner = isLearner
-	this.isProposer = isProposer
-	this.isAcceptor = isAcceptor
-
-	this.learnerList = learners
-	this.acceptorList = acceptors
-	this.proposerList = proposers
-
-	this.proposalBallot = -1
-	this.majoritySize = majoritySize
-	this.proposerIndex = proposerIndex
+	if err := this.restoreConfig(&config); err != nil {
+		this.Fatalf("could not configure the instance from wal record: %v", err)
+	}
 	return nil
 }
 
@@ -417,14 +408,14 @@ func (this *Paxos) TakeCheckpoint() error {
 	config.AcceptorList = this.acceptorList
 	config.MajoritySize = proto.Int32(int32(this.majoritySize))
 
-	if this.isLearner {
+	if this.IsLearner() {
 		config.IsLearner = proto.Bool(true)
 	}
-	if this.isProposer {
+	if this.IsProposer() {
 		config.IsProposer = proto.Bool(true)
 		config.ProposerIndex = proto.Int32(int32(this.proposerIndex))
 	}
-	if this.isAcceptor {
+	if this.IsAcceptor() {
 		config.IsAcceptor = proto.Bool(true)
 	}
 
@@ -461,17 +452,17 @@ func (this *Paxos) TakeCheckpoint() error {
 
 // IsLearner returns true if this paxos instance is a learner.
 func (this *Paxos) IsLearner() bool {
-	return this.isLearner
+	return atomic.LoadInt32(&this.isLearner) != 0
 }
 
 // IsAcceptor returns true if this paxos instance is an acceptor.
 func (this *Paxos) IsAcceptor() bool {
-	return this.isAcceptor
+	return atomic.LoadInt32(&this.isAcceptor) != 0
 }
 
 // IsProposer returns true if this paxos instance is a learner.
 func (this *Paxos) IsProposer() bool {
-	return this.isProposer
+	return atomic.LoadInt32(&this.isProposer) != 0
 }
 
 // ProposeRPC handles ProposeRequest rpc.
@@ -703,7 +694,7 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 		return errMarshal
 	}
 
-	notif := this.msn.NewRequest(this.namespace, this.uid, "ClassicPaxosLearn")
+	notif := this.msn.NewRequest(this.namespace, this.uid, "ClassicPaxos.Learn")
 	for _, learner := range this.learnerList {
 		if err := this.msn.Send(learner, notif, data); err != nil {
 			this.Warningf("could not send learn notification to %s (ignored): %v",
@@ -782,7 +773,7 @@ func (this *Paxos) LearnRPC(header *msgpb.Header,
 			}
 
 			notification := this.msn.NewRequest(this.namespace, this.uid,
-				"ClassicPaxosLearn")
+				"ClassicPaxos.Learn")
 			if err := this.msn.Send(clientID, notification, data); err != nil {
 				this.Errorf("could not send learn response to %s: %v", clientID, err)
 				status = errs.MergeErrors(status, err)
@@ -861,21 +852,81 @@ func (this *Paxos) Dispatch(header *msgpb.Header, data []byte) error {
 
 	switch {
 	case message.ProposeRequest != nil:
+		if !this.IsProposer() {
+			return errs.ErrInvalid
+		}
 		return this.ProposeRPC(header, message.ProposeRequest)
 
 	case message.Phase1Request != nil:
+		if !this.IsAcceptor() {
+			return errs.ErrInvalid
+		}
 		return this.Phase1RPC(header, message.Phase1Request)
 
 	case message.Phase2Request != nil:
+		if !this.IsAcceptor() {
+			return errs.ErrInvalid
+		}
 		return this.Phase2RPC(header, message.Phase2Request)
 
 	case message.LearnNotification != nil:
+		if !this.IsLearner() {
+			return errs.ErrInvalid
+		}
 		return this.LearnRPC(header, message.LearnNotification)
 
 	default:
 		this.Errorf("rpc request [%s] has no request parameters", header)
 		return errs.ErrInvalid
 	}
+}
+
+func (this *Paxos) Propose(value []byte, timeout time.Duration) (
+	[]byte, error) {
+
+	// If local instance is not a proposer, find a proposer randomly.
+	proposer := this.msn.UID()
+	if !this.IsProposer() {
+		proposer = this.proposerList[rand.Intn(len(this.proposerList))]
+	}
+	this.Infof("using %s as the proposer", proposer)
+
+	request := thispb.ProposeRequest{}
+	request.ProposedValue = value
+	message := thispb.PaxosMessage{}
+	message.ProposeRequest = &request
+	reqData, errMarshal := proto.Marshal(&message)
+	if errMarshal != nil {
+		this.Errorf("could not marshal propose request: %v", errMarshal)
+		return nil, errMarshal
+	}
+
+	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
+		"ClassicPaxos.Propose")
+	if err := this.msn.Send(proposer, reqHeader, reqData); err != nil {
+		this.Errorf("could not send propose request to %s: %v", proposer, err)
+		return nil, err
+	}
+
+	_, resData, errRecv := this.msn.Receive(reqHeader, timeout)
+	if errRecv != nil {
+		this.Errorf("could not receive propose response from %s: %v", proposer,
+			errRecv)
+		return nil, errRecv
+	}
+
+	if err := proto.Unmarshal(resData, &message); err != nil {
+		this.Errorf("could not parse propose response from %v", proposer, err)
+		return nil, err
+	}
+
+	if message.ProposeResponse == nil {
+		this.Errorf("propose response from %s is empty", proposer)
+		return nil, errs.ErrCorrupt
+	}
+
+	response := message.GetProposeResponse()
+	return response.GetChosenValue(), nil
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -885,7 +936,7 @@ func (this *Paxos) getNextProposalBallot() (int64, error) {
 	if this.proposalBallot < 0 {
 		nextProposalBallot = int64(this.proposerIndex)
 	} else {
-		nextProposalBallot += int64(len(this.acceptorList))
+		nextProposalBallot += int64(len(this.proposerList))
 	}
 
 	ballotChange := thispb.BallotChange{}
@@ -949,7 +1000,7 @@ func (this *Paxos) doPhase1(ballot int64) ([]byte, []string, error) {
 	}
 
 	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
-		"ClassicPaxosPhase1")
+		"ClassicPaxos.Phase1")
 	defer this.msn.CloseMessage(reqHeader)
 
 	count := 0
@@ -1071,7 +1122,8 @@ func (this *Paxos) doPhase2(ballot int64, value []byte,
 		return nil
 	}
 
-	header := this.msn.NewRequest(this.namespace, this.uid, "ClassicPaxosPhase2")
+	header := this.msn.NewRequest(this.namespace, this.uid,
+		"ClassicPaxos.Phase2")
 	defer this.msn.CloseMessage(header)
 
 	count := 0
@@ -1195,15 +1247,16 @@ func (this *Paxos) restoreConfig(config *thispb.Configuration) error {
 	this.proposerList = config.GetProposerList()
 	this.acceptorList = config.GetAcceptorList()
 
-	if config.IsLearner != nil {
-		this.isLearner = config.GetIsLearner()
+	if config.IsLearner != nil && config.GetIsLearner() {
+		atomic.StoreInt32(&this.isLearner, 1)
 	}
-	if config.IsAcceptor != nil {
-		this.isAcceptor = config.GetIsAcceptor()
+	if config.IsAcceptor != nil && config.GetIsAcceptor() {
+		atomic.StoreInt32(&this.isAcceptor, 1)
 	}
-	if config.IsProposer != nil {
-		this.isProposer = config.GetIsProposer()
+	if config.IsProposer != nil && config.GetIsProposer() {
+		atomic.StoreInt32(&this.isProposer, 1)
 		this.proposerIndex = int(config.GetProposerIndex())
+		this.Infof("configured as proposer %d", this.proposerIndex)
 	}
 
 	if config.MajoritySize != nil {
