@@ -108,7 +108,8 @@ type Paxos struct {
 
 	// Globally unique id for the consensus instance. All nodes participating in
 	// a consensus share the same uid.
-	uid string
+	uid       string
+	namespace string
 
 	// Classic paxos roles for this object.
 	isLearner  bool
@@ -149,9 +150,15 @@ type Paxos struct {
 	ballotAcceptorsMap map[int64]map[string]struct{}
 }
 
+// List of rpcs handled by classic paxos objects.
+var PaxosRPCList = []string{
+	"ClassicPaxosPropose", "ClassicPaxosPhase1", "ClassicPaxosPhase2",
+	"ClassicPaxosLearn",
+}
+
 // Initialize initializes a classic paxos instance.
-func (this *Paxos) Initialize(opts *Options, uid string, msn msg.Messenger,
-	wal wal.WriteAheadLog) (status error) {
+func (this *Paxos) Initialize(opts *Options, namespace, uid string,
+	msn msg.Messenger, wal wal.WriteAheadLog) (status error) {
 
 	if err := opts.Validate(); err != nil {
 		this.Errorf("invalid user options: %v", err)
@@ -171,27 +178,11 @@ func (this *Paxos) Initialize(opts *Options, uid string, msn msg.Messenger,
 		}
 	}()
 
-	methodList := []string{"Propose", "Phase1", "Phase2", "Learn", "Status"}
-	errRegister := msn.RegisterClass("paxos/classic", this, methodList...)
-	if errRegister != nil {
-		this.Errorf("could not export paxos instance rpcs: %v", errRegister)
-		return errRegister
-	}
-	defer func() {
-		if status != nil {
-			errUnregister := msn.UnregisterClass("paxos/classic", methodList...)
-			if errUnregister != nil {
-				this.Errorf("could not unregister paxos instance exports: %v",
-					errUnregister)
-				status = errs.MergeErrors(status, errUnregister)
-			}
-		}
-	}()
-
 	this.wal = wal
 	this.opts = *opts
 	this.msn = msn
 	this.uid = uid
+	this.namespace = namespace
 	this.proposerIndex = -1
 	this.promisedBallot = -1
 	this.votedBallot = -1
@@ -208,14 +199,6 @@ func (this *Paxos) Initialize(opts *Options, uid string, msn msg.Messenger,
 func (this *Paxos) Close() (status error) {
 	if err := this.ctlr.Close(); err != nil {
 		return err
-	}
-
-	methodList := []string{"Propose", "Phase1", "Phase2", "Learn", "Status"}
-	errUnregister := this.msn.UnregisterClass("paxos/classic", methodList...)
-	if errUnregister != nil {
-		this.Errorf("could not unregister methods from the messenger: %v",
-			errUnregister)
-		status = errs.MergeErrors(status, errUnregister)
 	}
 
 	if err := this.wal.ConfigureRecoverer(this.uid, nil); err != nil {
@@ -720,7 +703,7 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 		return errMarshal
 	}
 
-	notif := this.msn.NewRequest("paxos/classic", this.uid, "Learn")
+	notif := this.msn.NewRequest(this.namespace, this.uid, "ClassicPaxosLearn")
 	for _, learner := range this.learnerList {
 		if err := this.msn.Send(learner, notif, data); err != nil {
 			this.Warningf("could not send learn notification to %s (ignored): %v",
@@ -798,7 +781,8 @@ func (this *Paxos) LearnRPC(header *msgpb.Header,
 				return
 			}
 
-			notification := this.msn.NewRequest("paxos/classic", this.uid, "Learn")
+			notification := this.msn.NewRequest(this.namespace, this.uid,
+				"ClassicPaxosLearn")
 			if err := this.msn.Send(clientID, notification, data); err != nil {
 				this.Errorf("could not send learn response to %s: %v", clientID, err)
 				status = errs.MergeErrors(status, err)
@@ -964,7 +948,8 @@ func (this *Paxos) doPhase1(ballot int64) ([]byte, []string, error) {
 		return nil, nil, errMarshal
 	}
 
-	reqHeader := this.msn.NewRequest("paxos/classic", this.uid, "Phase1")
+	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
+		"ClassicPaxosPhase1")
 	defer this.msn.CloseMessage(reqHeader)
 
 	count := 0
@@ -1086,7 +1071,7 @@ func (this *Paxos) doPhase2(ballot int64, value []byte,
 		return nil
 	}
 
-	header := this.msn.NewRequest("paxos/classic", this.uid, "Phase2")
+	header := this.msn.NewRequest(this.namespace, this.uid, "ClassicPaxosPhase2")
 	defer this.msn.CloseMessage(header)
 
 	count := 0

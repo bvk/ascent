@@ -116,8 +116,17 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		}
 
 		paxos1 := &Paxos{Logger: logger}
-		if err := paxos1.Initialize(paxosOpts, "test", msn1, wal1); err != nil {
-			test.Errorf("could not initialize paxos1 instance for %s: %v", name, err)
+		errInit := paxos1.Initialize(paxosOpts, "paxos/classic", "test", msn1,
+			wal1)
+		if errInit != nil {
+			test.Errorf("could not initialize paxos1 instance for %s: %v", name,
+				errInit)
+			return nil
+		}
+
+		errRegister := msn1.RegisterClass("paxos/classic", paxos1, PaxosRPCList...)
+		if errRegister != nil {
+			test.Errorf("could not export paxos instance rpcs: %v", errRegister)
 			return nil
 		}
 
@@ -192,7 +201,8 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		}
 
 		start := time.Now()
-		reqHeader := client.msn.NewRequest("paxos/classic", "test", "Propose")
+		reqHeader := client.msn.NewRequest("paxos/classic", "test",
+			"ClassicPaxosPropose")
 		if err := client.msn.Send(proposer.name, reqHeader, reqData); err != nil {
 			test.Errorf("could not send propose request to %s from %s: %v",
 				proposer.name, client.name, err)
@@ -242,6 +252,14 @@ func TestClassicPaxosConsensus(test *testing.T) {
 	}
 
 	closeAgent := func(agent *Agent) {
+		errUnregister := agent.msn.UnregisterClass("paxos/classic",
+			PaxosRPCList...)
+		if errUnregister != nil {
+			test.Errorf("could not unregister paxos instance exports: %v",
+				errUnregister)
+			return
+		}
+
 		if err := agent.paxos.Close(); err != nil {
 			test.Errorf("could not close paxos on %s: %v", agent.name, err)
 			return
