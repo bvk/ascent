@@ -45,12 +45,27 @@ type Condition struct {
 
 	// A channel to send signals to the waiters.
 	signalCh chan struct{}
+
+	// A channel to broadcast close operation
+	closeCh chan struct{}
 }
 
 // Initialize initializes a condition variable.
 func (this *Condition) Initialize(locker sync.Locker) {
 	this.locker = locker
 	this.signalCh = make(chan struct{}, 1)
+	this.closeCh = make(chan struct{})
+}
+
+// Close unblocks all waiters with ErrClosed.
+func (this *Condition) Close() error {
+	select {
+	case <-this.closeCh:
+		return errs.ErrClosed
+	default:
+		close(this.closeCh)
+	}
+	return nil
 }
 
 // WaitTimeout blocks the caller for specified time for a signal. Caller is
@@ -62,14 +77,13 @@ func (this *Condition) Initialize(locker sync.Locker) {
 // otherwise.
 func (this *Condition) WaitTimeout(timeoutCh <-chan time.Time) (status error) {
 	signalCh := this.signalCh
+
 	this.locker.Unlock()
 	select {
-	case time := <-timeoutCh:
-		if time.IsZero() {
-			status = errs.ErrClosed
-		} else {
-			status = errs.ErrTimeout
-		}
+	case <-this.closeCh:
+		status = errs.ErrClosed
+	case <-timeoutCh:
+		status = errs.ErrTimeout
 	case <-signalCh:
 	}
 	this.locker.Lock()
@@ -79,11 +93,18 @@ func (this *Condition) WaitTimeout(timeoutCh <-chan time.Time) (status error) {
 
 // Wait blocks the caller for a signal. Caller is required to hold the lock
 // before calling this function.
-func (this *Condition) Wait() {
+//
+// Returns non-nil error if wake up was due to a Close operation.
+func (this *Condition) Wait() (status error) {
 	signalCh := this.signalCh
 	this.locker.Unlock()
-	<-signalCh
+	select {
+	case <-this.closeCh:
+		status = errs.ErrClosed
+	case <-signalCh:
+	}
 	this.locker.Lock()
+	return status
 }
 
 // Broadcast wakes up all waiters. Caller is required to hold the lock before

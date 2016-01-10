@@ -92,7 +92,7 @@ func TestResourceController(test *testing.T) {
 	b1 := controller.LockAll()
 	timeoutCh2 := make(chan time.Time)
 	close(timeoutCh2)
-	if _, err := controller.TimeLockAll(timeoutCh2); !errs.IsClosed(err) {
+	if _, err := controller.TimeLockAll(timeoutCh2); !errs.IsTimeout(err) {
 		test.Errorf("closing timeout channel did not unblock the lock")
 		return
 	}
