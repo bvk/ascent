@@ -1,0 +1,42 @@
+# -*- mode: makefile -*-
+#
+# Copyright (c) 2016 BVK Chaitanya
+#
+# This file is part of the Ascent Library.
+#
+# The Ascent Library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# The Ascent Library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+# This file defines GNU Make based rules for using and configuring git. All
+# targets defined in this file should use git-* prefix.
+
+GITROOT = $(shell git rev-parse --show-toplevel)
+GITCOMMIT = $(shell git rev-parse HEAD)
+GITBRANCH = $(shell git symbolic-ref --short HEAD)
+
+# Prints Git environment information in shell variables format.
+git-env:
+	@echo "GITROOT=$(GITROOT)"
+	@echo "GITCOMMIT=$(GITCOMMIT)"
+	@echo "GITBRANCH=$(GITBRANCH)"
+
+# Sets up git hooks so that git commands can automatically check for our coding
+# standard conventions.
+git-setup-hooks:
+	ln -sf ../../scripts/git-pre-push.sh $(GITROOT)/.git/hooks/pre-push
+
+# This target is invoked when git-push command is run by the user. It verifies
+# that commits that are to be sent to the central Git server follow our coding
+# standard conventions.
+git-pre-push:
+	go run $(GITROOT)/scripts/git-pre-push.go
