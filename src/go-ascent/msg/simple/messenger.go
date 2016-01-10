@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -87,8 +88,11 @@ func (this *Options) Validate() (status error) {
 type Messenger struct {
 	log.Logger
 
+	// Wait group to wait for goroutines to finish.
+	wg sync.WaitGroup
+
 	// Controller for admission control and synchronization.
-	ctlr ctlr.SimpleController
+	ctlr ctlr.BasicController
 
 	// Flag, when true, indicates that messenger is started.
 	started bool
@@ -181,12 +185,12 @@ func (this *Messenger) Initialize(opts *Options, uid string) (status error) {
 	this.uid = uid
 	this.opts = *opts
 	this.ctlr.Logger = this
-	this.ctlr.Initialize()
 	this.exportMap = make(map[string]map[string]msg.Handler)
 	this.peerMap = make(map[string]*Peer)
 	this.listenerMap = make(map[string]net.Listener)
 	this.requestMap = make(map[int64]chan *Entry)
 	this.Logger = this.NewLogger("simple-messenger:%s", uid)
+	this.ctlr.Initialize(this)
 	return nil
 }
 
@@ -203,13 +207,12 @@ func (this *Messenger) Close() (status error) {
 		}
 	}
 
-	this.ctlr.Wait()
 	return status
 }
 
 // Start activates the messenger by opening all its listeners.
 func (this *Messenger) Start() error {
-	token, errToken := this.ctlr.NewToken("start", 0 /* timeout */)
+	token, errToken := this.ctlr.NewToken("start", nil /* timeout */)
 	if errToken != nil {
 		return errToken
 	}
@@ -234,7 +237,7 @@ func (this *Messenger) Start() error {
 // all open transports, so no further messages can be sent or received using
 // the messenger.
 func (this *Messenger) Stop() error {
-	token, errToken := this.ctlr.NewToken("start", 0 /* timeout */)
+	token, errToken := this.ctlr.NewToken("start", nil /* timeout */)
 	if errToken != nil {
 		return errToken
 	}
@@ -266,8 +269,12 @@ func (this *Messenger) UID() string {
 //
 // Returns nil on success.
 func (this *Messenger) AddListenerAddress(newAddress string) error {
-	lock := this.ctlr.Lock("this.state", "this.listenerMap")
-	defer lock.Unlock()
+	token, errToken := this.ctlr.NewToken("AddListenerAddress",
+		nil /* timeout */, "this.state", "this.listenerMap")
+	if errToken != nil {
+		return errToken
+	}
+	defer this.ctlr.CloseToken(token)
 
 	// Check for duplicates.
 	for _, address := range this.state.ListenerAddressList {
@@ -292,7 +299,8 @@ func (this *Messenger) AddListenerAddress(newAddress string) error {
 	// If the messenger is started, we should open a new listener.
 	if this.started {
 		if err := this.startListener(newAddress); err != nil {
-			this.Errorf("could not start listener on address %s: %v", newAddress, err)
+			this.Errorf("could not start listener on address %s: %v", newAddress,
+				err)
 			return err
 		}
 	}
@@ -314,8 +322,12 @@ func (this *Messenger) AddListenerAddress(newAddress string) error {
 func (this *Messenger) AddPeerAddress(peerID string,
 	addressList []string) error {
 
-	lock := this.ctlr.Lock("this.state")
-	defer lock.Unlock()
+	token, errToken := this.ctlr.NewToken("AddPeerAddress", nil, /* timeout */
+		"this.state")
+	if errToken != nil {
+		return errToken
+	}
+	defer this.ctlr.CloseToken(token)
 
 	// Check the address list.
 	validList, unsupportedList, errCheck := this.CheckPeerAddressList(peerID,
@@ -402,7 +414,7 @@ func (this *Messenger) NewRequest(classID, objectID,
 	// acquiring the lock multiple times, which adds unnecessary overhead,
 	// because we update requestMap with response channel only once.
 	//
-	token, errToken := this.ctlr.NewToken("NewRequest", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("NewRequest", nil, /* timeout */
 		"this.requestMap")
 	if errToken != nil {
 		return nil
@@ -434,7 +446,7 @@ func (this *Messenger) CloseMessage(header *msgpb.Header) error {
 	//
 	// Remove the request and its response channel from live requests map.
 	//
-	token, errToken := this.ctlr.NewToken("CloseMessage", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("CloseMessage", nil, /* timeout */
 		"this.requestMap")
 	if errToken != nil {
 		return errToken
@@ -464,7 +476,7 @@ func (this *Messenger) CloseMessage(header *msgpb.Header) error {
 func (this *Messenger) NewPeer(peerID string, addressList []string) (
 	*Peer, error) {
 
-	token, errToken := this.ctlr.NewToken("NewPeer", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("NewPeer", nil, /* timeout */
 		"this.peerMap")
 	if errToken != nil {
 		return nil, errToken
@@ -485,7 +497,7 @@ func (this *Messenger) NewPeer(peerID string, addressList []string) (
 //
 // Returns remote messenger instance.
 func (this *Messenger) OpenPeer(peerID string) (*Peer, error) {
-	token, errToken := this.ctlr.NewToken("OpenPeer", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("OpenPeer", nil, /* timeout */
 		"this.peerMap", "this.state")
 	if errToken != nil {
 		return nil, errToken
@@ -513,7 +525,7 @@ func (this *Messenger) OpenPeer(peerID string) (*Peer, error) {
 //
 // Returns nil on success.
 func (this *Messenger) ClosePeer(peerID string) (status error) {
-	token, errToken := this.ctlr.NewToken("ClosePeer", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("ClosePeer", nil, /* timeout */
 		"this.peerMap", peerID)
 	if errToken != nil {
 		return errToken
@@ -527,9 +539,7 @@ func (this *Messenger) ClosePeer(peerID string) (status error) {
 
 	delete(this.peerMap, peerID)
 
-	if !this.ctlr.ReleaseResource(token, "this.peerMap") {
-		this.Fatalf("could not release resource that was just acquired")
-	}
+	token.ReleaseResources("this.peerMap")
 
 	close(peer.outCh)
 	for tport := range peer.transportMap {
@@ -591,7 +601,7 @@ func (this *Messenger) Send(targetID string, header *msgpb.Header,
 func (this *Messenger) Receive(request *msgpb.Header, timeout time.Duration) (
 	*msgpb.Header, []byte, error) {
 
-	token, errToken := this.ctlr.NewToken("Receive", timeout,
+	token, errToken := this.ctlr.NewToken("Receive", time.After(timeout),
 		"this.requestMap")
 	if errToken != nil {
 		return nil, nil, errToken
@@ -699,6 +709,7 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 	// Set the negotiation deadline.
 	start := time.Now()
 	deadline := start.Add(timeout)
+	timeoutCh := time.After(timeout)
 	connection.SetDeadline(deadline)
 	defer connection.SetDeadline(time.Time{})
 
@@ -795,7 +806,7 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 	}
 
 	// Negotiation was successful, so add the transport to the remote messenger.
-	token, errToken := this.ctlr.NewToken("NewTransport", time.Since(start),
+	token, errToken := this.ctlr.NewToken("NewTransport", timeoutCh,
 		remoteID)
 	if errToken != nil {
 		this.Errorf("could not get token for opening new transport %s: %v",
@@ -808,7 +819,7 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 	this.Infof("added new transport %s connecting to peer %s", tport.name,
 		remoteID)
 
-	this.ctlr.Add(1)
+	this.wg.Add(1)
 	go this.goReceive(peer, tport)
 	return tport, nil
 }
@@ -823,7 +834,7 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 func (this *Messenger) CloseTransport(peer *Peer, tport *Transport) (
 	status error) {
 
-	token, errToken := this.ctlr.NewToken("CloseTransport", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("CloseTransport", nil, /* timeout */
 		peer.peerID)
 	if errToken != nil {
 		return errToken
@@ -856,7 +867,7 @@ func (this *Messenger) CloseTransport(peer *Peer, tport *Transport) (
 func (this *Messenger) RegisterClass(classID string, handler msg.Handler,
 	methodList ...string) error {
 
-	token, errToken := this.ctlr.NewToken("RegisterClass", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("RegisterClass", nil, /* timeout */
 		"this.exportMap")
 	if errToken != nil {
 		return errToken
@@ -900,7 +911,7 @@ func (this *Messenger) RegisterClass(classID string, handler msg.Handler,
 func (this *Messenger) UnregisterClass(classID string,
 	methodList ...string) error {
 
-	token, errToken := this.ctlr.NewToken("UnregisterClass", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("UnregisterClass", nil, /* timeout */
 		"this.exportMap")
 	if errToken != nil {
 		return errToken
@@ -995,7 +1006,7 @@ func (this *Messenger) DispatchPost(header *msgpb.Header, data []byte) error {
 func (this *Messenger) DispatchResponse(header *msgpb.Header,
 	data []byte) error {
 
-	token, errToken := this.ctlr.NewToken("DispatchResponse", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("DispatchResponse", nil, /* timeout */
 		"this.requestMap")
 	if errToken != nil {
 		return errToken
@@ -1035,7 +1046,7 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 func (this *Messenger) DispatchRequest(header *msgpb.Header,
 	data []byte) (msnStatus, appStatus error) {
 
-	token, errToken := this.ctlr.NewToken("DispatchRequest", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("DispatchRequest", nil, /* timeout */
 		"this.exportMap")
 	if errToken != nil {
 		return errToken, nil
@@ -1089,7 +1100,7 @@ func (this *Messenger) DispatchRequest(header *msgpb.Header,
 func (this *Messenger) FlushMessages(peer *Peer, entryList ...*Entry) (
 	int, error) {
 
-	token, errToken := this.ctlr.NewToken("FlushMessages", 0, /* timeout */
+	token, errToken := this.ctlr.NewToken("FlushMessages", nil, /* timeout */
 		peer.peerID)
 	if errToken != nil {
 		return 0, errToken
@@ -1160,7 +1171,7 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList ...*Entry) (
 
 // HasListener returns true if a listener address is valid.
 func (this *Messenger) HasListener(address string) bool {
-	lock := this.ctlr.Lock("this.listenerMap")
+	lock := this.ctlr.ReadLock("this.listenerMap")
 	defer lock.Unlock()
 
 	if this.listenerMap == nil {
@@ -1173,7 +1184,7 @@ func (this *Messenger) HasListener(address string) bool {
 
 // ListenerAddressList returns all current listeners' addresses.
 func (this *Messenger) ListenerAddressList() []string {
-	lock := this.ctlr.Lock("this.listenerMap")
+	lock := this.ctlr.ReadLock("this.listenerMap")
 	defer lock.Unlock()
 	//
 	// Client tools that don't have a well defined port number, so their
@@ -1315,7 +1326,7 @@ func (this *Messenger) startListener(address string) error {
 
 	this.listenerMap[address] = listener
 
-	this.ctlr.Add(1)
+	this.wg.Add(1)
 	go this.goAccept(address, listener)
 	return nil
 }
@@ -1335,7 +1346,7 @@ func (this *Messenger) stopListener(address string) (status error) {
 }
 
 func (this *Messenger) goAccept(listenerID string, listener net.Listener) {
-	defer this.ctlr.Done()
+	defer this.wg.Done()
 
 	for {
 		connection, errAccept := listener.Accept()
@@ -1352,9 +1363,9 @@ func (this *Messenger) goAccept(listenerID string, listener net.Listener) {
 		this.Infof("received incoming connection from %s to listener %s",
 			connection.RemoteAddr(), listenerID)
 
-		this.ctlr.Add(1)
+		this.wg.Add(1)
 		go func(connection net.Conn) {
-			defer this.ctlr.Done()
+			defer this.wg.Done()
 
 			remoteAddr := connection.RemoteAddr()
 			_, errTport := this.NewTransport(listenerID, connection,
@@ -1397,7 +1408,7 @@ func (this *Messenger) doNewPeer(peerID string, addressList []string) (
 	}
 	this.peerMap[peerID] = peer
 
-	this.ctlr.Add(1)
+	this.wg.Add(1)
 	go this.goSend(peer)
 	return peer, nil
 }
@@ -1405,7 +1416,7 @@ func (this *Messenger) doNewPeer(peerID string, addressList []string) (
 // goReceive reads incoming messages from a transport and handles them
 // appropriately.
 func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
-	defer this.ctlr.Done()
+	defer this.wg.Done()
 	defer this.CloseTransport(peer, tport)
 
 	for {
@@ -1435,7 +1446,7 @@ func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 
 // goSend sends outgoing messages on a transport.
 func (this *Messenger) goSend(peer *Peer) {
-	defer this.ctlr.Done()
+	defer this.wg.Done()
 	defer this.ClosePeer(peer.peerID)
 
 	var entryList []*Entry
