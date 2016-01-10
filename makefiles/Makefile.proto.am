@@ -22,8 +22,8 @@
 PROTO_DIRS =
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/base/errs
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/fun/bender
+PROTO_DIRS += $(top_srcdir)/src/proto-ascent/msg
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/wal
-
 
 PROTO_FILES = $(foreach dir,$(PROTO_DIRS),$(wildcard $(dir)/*.proto))
 proto-all-local: proto-go-all-local proto-cc-all-local

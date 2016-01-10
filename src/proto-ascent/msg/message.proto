@@ -1,0 +1,105 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// Protobuf definitions for ascent/msg library.
+//
+
+import "proto-ascent/base/errs/error.proto";
+
+package ascent.msg;
+option go_package = "msg";
+
+// MessageOptions defines message specific constraints for the sending or
+// receiving messengers. This may include constrains like, priority, checksum,
+// authentication codes, etc.
+message MessageOptions {
+}
+
+// MessengerOptions define messenger specific information relayed between
+// messengers. This may includes information like, QOS, routing,
+// incarnation-id, etc.
+message MessengerOptions {
+  // List of addresses where message source can be reached. This is currently
+  // used in socket negotiation phase to learn about new peers and how to reach
+  // them, etc.
+  repeated string address_list = 1;
+}
+
+// DataOptions define any specific parameters for the user-defined data
+// included in the message.
+message DataOptions {
+}
+
+// RequestOptions are any specific parameters that only make sense for
+// requests.
+message RequestOptions {
+}
+
+// ResponseOptions are any specific parameters that only make sense for
+// responses.
+message ResponseOptions {
+}
+
+// Header defines the meta-data associated with a message.
+message Header {
+  // Message id and Messenger id uniquely identify a message. Since messenger
+  // id is globally unique, message becomes unique.
+  required int64 message_id = 1;
+  required string messenger_id = 2;
+
+  // Optional meta-data or parameters for the message.
+  message Options {
+	optional MessageOptions message_options = 1;
+	optional MessengerOptions messenger_options = 2;
+	optional DataOptions data_options = 3;
+	optional RequestOptions request_options = 4;
+	optional ResponseOptions response_options = 5;
+  }
+  optional Request options = 3;
+
+  // Request parameters if message is a request.
+  message Request {
+	// Type or namespace name for the request target.
+	required string class_id = 1;
+
+	// Name of the target operation for the request.
+	required string method_name = 2;
+
+	// Unique object id, if requested operation can be invoked on many
+	// different objects.
+	optional string object_id = 3;
+  }
+  optional Request request = 4;
+
+  // Response parameters if message is a response.
+  message Response {
+	// Message id for the associated request at the source.
+	required int64 request_id = 1;
+
+	// Any error happened at the messenger before corresponding request is
+	// dispatched. If this field is non-nil, it means request was not
+	// dispatched.
+	optional ascent.base.errs.Error messenger_status = 2;
+
+	// Any error happened after the message is dispatched to the target
+	// operation. If this field is non-nil, it means request has failed with an
+	// error.
+	optional ascent.base.errs.Error handler_status = 3;
+  }
+  optional Response response = 5;
+}
