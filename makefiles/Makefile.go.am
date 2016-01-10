@@ -1,0 +1,44 @@
+# Copyright (c) 2016 BVK Chaitanya
+#
+# This file is part of the Ascent Library.
+#
+# The Ascent Library is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# The Ascent Library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+#
+# Make/Automake variables and rules for Go sources.
+#
+
+# Path to the root directory of Go source files.
+export GOPATH = $(abs_top_srcdir)
+
+# Path to the directory where go binaries are created.
+export GOBIN = $(abs_top_srcdir)/bin
+
+# Extra directories created in the build process.
+CLEANDIRS += $(abs_top_srcdir)/pkg
+
+# Prints Go environment information in shell variables format.
+go-env:
+	@go env
+
+# Buile rule to run tests on all Go packages as part of
+# make-check. Users can use GOTESTFLAGS variable to pass command line
+# options to the 'go test' command. GOTESTFLAGS name is picked to be
+# similar to CFLAGS, CPPFLAGS, etc.
+check-local:
+	go test $(GOTESTFLAGS) go-ascent/...
+
+# Build rule to compile all Go packages and binaries as part of make.
+all-local:
+	go install $(GOFLAGS) go-ascent/...
