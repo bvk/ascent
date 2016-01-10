@@ -1,0 +1,67 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// This file defines wal record format for algo/election package.
+//
+
+package ascent.algo.election;
+option go_package = "election";
+
+message WALRecord {
+  optional Checkpoint checkpoint = 1;
+
+  optional Configuration config_change = 2;
+
+  optional CommitteeChange committee_change = 3;
+
+  optional ElectionChange election_change = 4;
+}
+
+message Checkpoint {
+  required Configuration configuration = 1;
+
+  optional CommitteeState committee_state = 2;
+
+  required ElectionState election_state = 3;
+}
+
+message Configuration {
+  repeated string committee_list = 1;
+  required bool in_committee = 2;
+  required int32 majority_size = 3;
+}
+
+message CommitteeState {
+  repeated int64 election_round_list = 1;
+  repeated string election_winner_list = 2;
+}
+
+message ElectionState {
+  required int64 current_round = 1;
+  required string current_winner = 2;
+}
+
+message CommitteeChange {
+  required int64 new_election_round = 1;
+  required string new_election_winner = 2;
+}
+
+message ElectionChange {
+  required int64 election_round = 1;
+  required string election_winner = 2;
+}

@@ -75,8 +75,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/golang/protobuf/proto"
 
@@ -85,7 +87,6 @@ import (
 	"go-ascent/wal"
 
 	walpb "proto-ascent/wal"
-	"sync/atomic"
 )
 
 // Options defines user configurable options for local wal.
@@ -178,8 +179,11 @@ type WriteAheadLog struct {
 	// List of change files opened for writing.
 	changeFileMap map[int64]*os.File
 
-	// Mapping from user id to recoverer for records with the matching user id.
+	// Mapping from regexp to the corresponding recoverer.
 	recovererMap map[string]wal.Recoverer
+
+	// List of regexp recoverers in the configuration order.
+	regexpList []*regexp.Regexp
 
 	// Atomic variable to indicate if wal is currently recovering.
 	recovering int32
@@ -272,18 +276,24 @@ func (this *WriteAheadLog) IsRecovering() bool {
 // recoverer: Recoverer for the records with matching user id.
 //
 // Returns nil on success.
-func (this *WriteAheadLog) ConfigureRecoverer(uid string,
+func (this *WriteAheadLog) ConfigureRecoverer(re *regexp.Regexp,
 	recoverer wal.Recoverer) (status error) {
 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
-	if _, ok := this.recovererMap[uid]; ok {
-		this.Errorf("recoverer for uid %s already configured", uid)
+	reStr := re.String()
+	if _, ok := this.recovererMap[reStr]; ok {
+		if recoverer == nil {
+			delete(this.recovererMap, reStr)
+			return nil
+		}
+		this.Errorf("recoverer for %s is already configured", reStr)
 		return errs.ErrExist
 	}
 
-	this.recovererMap[uid] = recoverer
+	this.regexpList = append(this.regexpList, re)
+	this.recovererMap[reStr] = recoverer
 	return nil
 }
 
@@ -343,8 +353,8 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 		cbw := func(offset int64, header *walpb.RecordHeader, data []byte) error {
 			var uid string
 			if header.UserId != nil {
-				uid = *header.UserId
-				if recoverer, ok := this.recovererMap[uid]; ok {
+				uid = header.GetUserId()
+				if recoverer := this.findRecoverer(uid); recoverer != nil {
 					return recoverer.RecoverCheckpoint(uid, data)
 				}
 			}
@@ -363,9 +373,9 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 	cbw := func(offset int64, header *walpb.RecordHeader, data []byte) error {
 		var uid string
 		if header.UserId != nil {
-			uid = *header.UserId
-			if recoverer, ok := this.recovererMap[uid]; ok {
-				return recoverer.RecoverChange(offset, uid, data)
+			uid = header.GetUserId()
+			if recoverer := this.findRecoverer(uid); recoverer != nil {
+				return recoverer.RecoverCheckpoint(uid, data)
 			}
 		}
 		return recoverer.RecoverChange(offset, uid, data)
@@ -612,6 +622,20 @@ func (this *WriteAheadLog) AppendCheckpointRecord(uid string, data []byte) (
 //
 // Private functions
 //
+
+// findRecoverer returns the recoverer for a record based on its uid.
+func (this *WriteAheadLog) findRecoverer(uid string) wal.Recoverer {
+	for _, re := range this.regexpList {
+		recoverer, found := this.recovererMap[re.String()]
+		if !found {
+			continue
+		}
+		if re.MatchString(uid) {
+			return recoverer
+		}
+	}
+	return nil
+}
 
 // syncChanges flushes all change records before a desired offset and issues
 // fdatasync for all open files.

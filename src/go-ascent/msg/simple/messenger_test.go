@@ -88,12 +88,12 @@ func TestLoopbackMessages(test *testing.T) {
 
 	start := time.Now()
 	for ii := 0; ii < 1000; ii++ {
-		reqHeader := msn1.NewRequest("msn1", "", "a")
+		reqHeader := msn1.NewRequest("msn1", "", "a", time.Second)
 		if err := msn1.Send("msn1", reqHeader, []byte("request")); err != nil {
 			test.Errorf("could not send request to self: %v", err)
 			return
 		}
-		if _, _, err := msn1.Receive(reqHeader, time.Second); err != nil {
+		if _, _, err := msn1.Receive(reqHeader); err != nil {
 			test.Errorf("could not receive response from self: %v", err)
 			return
 		}
@@ -210,13 +210,13 @@ func TestNetworkMessaging(test *testing.T) {
 	const count = 1000
 	start := time.Now()
 	for ii := 0; ii < count; ii++ {
-		reqHeader := msn2.NewRequest("class", "", "ping")
+		reqHeader := msn2.NewRequest("class", "", "ping", time.Second)
 		reqData := []byte("request-data")
 		if err := msn2.Send("msn1", reqHeader, reqData); err != nil {
 			test.Errorf("could not send request to msn1: %v", err)
 			return
 		}
-		resHeader, _, errRecv := msn2.Receive(reqHeader, time.Second)
+		resHeader, _, errRecv := msn2.Receive(reqHeader)
 		if errRecv != nil {
 			test.Errorf("could not receive response from msn1: %v", errRecv)
 			return

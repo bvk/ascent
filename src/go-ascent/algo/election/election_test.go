@@ -16,13 +16,12 @@
 // along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
 
 //
-// This file implements unit tests for classic paxos.
+// This file implements unit tests for algo/election package.
 //
 
-package classic
+package election
 
 import (
-	"bytes"
 	"io/ioutil"
 	"os"
 	"runtime"
@@ -31,22 +30,23 @@ import (
 
 	"go-ascent/base/log"
 	"go-ascent/msg/simple"
+	"go-ascent/paxos/classic"
 	"go-ascent/wal/fswal"
 )
 
-func TestClassicPaxosConsensus(test *testing.T) {
+func TestAlgoElection(test *testing.T) {
 	runtime.GOMAXPROCS(4)
 
-	filePath := "/tmp/test_paxos_classic_consensus.log"
+	filePath := "/tmp/test_algo_election.log"
 	simpleLog := log.SimpleFileLog{}
 	if err := simpleLog.Initialize(filePath); err != nil {
 		test.Fatalf("could not initialize log backend: %v", err)
 		return
 	}
-	logger := simpleLog.NewLogger("test-paxos-classic")
+	logger := simpleLog.NewLogger("test-algo-election")
 	logger.Infof("starting new test")
 
-	tmpDir, errTemp := ioutil.TempDir("", "TestWALChanges")
+	tmpDir, errTemp := ioutil.TempDir("", "TestAlgoElectionWAL")
 	if errTemp != nil {
 		test.Fatalf("could not create temporary directory: %v", errTemp)
 	}
@@ -63,6 +63,10 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		MaxFileSize:     1024 * 1024,
 		FileMode:        os.FileMode(0600),
 	}
+	if err := walOpts.Validate(); err != nil {
+		test.Errorf("could not validate fswal options: %v", err)
+		return
+	}
 
 	msnOpts := &simple.Options{
 		MaxWriteTimeout:        20 * time.Millisecond,
@@ -70,7 +74,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		SendQueueSize:          1024,
 		NegotiationTimeout:     20 * time.Millisecond,
 		SendRetryTimeout:       10 * time.Millisecond,
-		MaxDispatchRequests:    10,
+		MaxDispatchRequests:    1024,
 		DispatchRequestTimeout: time.Millisecond,
 	}
 	if err := msnOpts.Validate(); err != nil {
@@ -78,62 +82,73 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		return
 	}
 
-	paxosOpts := &Options{
-		ProposeRetryInterval:    time.Millisecond,
-		NumExtraPhase1Acceptors: 1,
-		LearnTimeout:            10 * time.Millisecond,
+	electionOpts := &Options{
+		MaxElectionHistory: 10,
+		PaxosOptions: classic.Options{
+			ProposeRetryInterval:    time.Millisecond,
+			NumExtraPhase1Acceptors: 1,
+			LearnTimeout:            time.Second,
+		},
+	}
+	if err := electionOpts.Validate(); err != nil {
+		test.Errorf("could not validate election options: %v", err)
+		return
 	}
 
 	type Agent struct {
+		log.Logger
+
 		name        string
 		addressList []string
 		chosen      []byte
 
-		wal   *fswal.WriteAheadLog
-		msn   *simple.Messenger
-		paxos *Paxos
+		wal      *fswal.WriteAheadLog
+		msn      *simple.Messenger
+		election *Election
 	}
 
 	newAgent := func(name string) *Agent {
 		agent := &Agent{}
 
-		wal1 := &fswal.WriteAheadLog{Logger: logger}
-		if err := wal1.Initialize(walOpts, tmpDir, name); err != nil {
+		wal := &fswal.WriteAheadLog{Logger: logger}
+		if err := wal.Initialize(walOpts, tmpDir, name); err != nil {
 			test.Errorf("could not create wal for %s: %v", name, err)
 			return nil
 		}
 
-		msn1 := &simple.Messenger{Logger: logger}
-		if err := msn1.Initialize(msnOpts, name); err != nil {
+		msn := &simple.Messenger{Logger: logger}
+		if err := msn.Initialize(msnOpts, name); err != nil {
 			test.Errorf("could not initialize messenger for %s: %v", name, err)
 			return nil
 		}
 
-		paxos1 := &Paxos{Logger: logger}
-		errInit := paxos1.Initialize(paxosOpts, "paxos/classic", "test", msn1,
-			wal1)
+		election := &Election{Logger: logger}
+		errInit := election.Initialize(electionOpts, "algo/election", "test", msn,
+			wal)
 		if errInit != nil {
-			test.Errorf("could not initialize paxos1 instance for %s: %v", name,
+			test.Errorf("could not initialize election instance for %s: %v", name,
 				errInit)
 			return nil
 		}
 
-		rpcList := PaxosRPCList()
-		errRegister := msn1.RegisterClass("paxos/classic", paxos1, rpcList...)
+		rpcList := ElectionRPCList()
+		errRegister := msn.RegisterClass("algo/election", election, rpcList...)
 		if errRegister != nil {
 			test.Errorf("could not export paxos instance rpcs: %v", errRegister)
 			return nil
 		}
 
+		agent.Logger = msn
 		agent.name = name
-		agent.msn = msn1
-		agent.wal = wal1
-		agent.paxos = paxos1
+		agent.msn = msn
+		agent.wal = wal
+		agent.election = election
 		return agent
 	}
 	agent1 := newAgent("one")
 	agent2 := newAgent("two")
 	agent3 := newAgent("three")
+	other := newAgent("other")
 
 	startAgent := func(agent *Agent) {
 		if err := agent.msn.Start(); err != nil {
@@ -141,9 +156,9 @@ func TestClassicPaxosConsensus(test *testing.T) {
 			return
 		}
 
-		msn1Address := "tcp://127.0.0.1:0"
-		if err := agent.msn.AddListenerAddress(msn1Address); err != nil {
-			test.Errorf("could not add listener address %s to %s: %v", msn1Address,
+		msnAddress := "tcp://127.0.0.1:0"
+		if err := agent.msn.AddListenerAddress(msnAddress); err != nil {
+			test.Errorf("could not add listener address %s to %s: %v", msnAddress,
 				agent.name, err)
 			return
 		}
@@ -152,6 +167,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 	startAgent(agent1)
 	startAgent(agent2)
 	startAgent(agent3)
+	startAgent(other)
 
 	connectAgents := func(this *Agent, rest ...*Agent) {
 		for _, other := range rest {
@@ -163,65 +179,69 @@ func TestClassicPaxosConsensus(test *testing.T) {
 			}
 		}
 	}
-	connectAgents(agent1, agent2, agent3)
-	connectAgents(agent2, agent1, agent3)
-	connectAgents(agent3, agent1, agent2)
+	connectAgents(agent1, agent2, agent3, other)
+	connectAgents(agent2, agent1, agent3, other)
+	connectAgents(agent3, agent1, agent2, other)
+	connectAgents(other, agent1, agent2, agent3)
 
-	configureAgents := func(this *Agent,
-		proposers, acceptors, learners []string) {
-		errConfig := this.paxos.Configure(proposers, acceptors, learners)
+	configureAgents := func(this *Agent, committee []string) {
+		errConfig := this.election.Configure(committee)
 		if errConfig != nil {
 			test.Errorf("could not configure paxos on %s: %v", this.name,
 				errConfig)
 			return
 		}
 	}
-	agents := []string{agent1.name, agent2.name, agent3.name}
-	configureAgents(agent1, agents, agents, agents)
-	configureAgents(agent2, agents, agents, agents)
-	configureAgents(agent3, agents, agents, agents)
+	committee := []string{agent1.name, agent2.name, agent3.name}
+	configureAgents(agent1, committee)
+	configureAgents(agent2, committee)
+	configureAgents(agent3, committee)
+	configureAgents(other, committee)
 
 	doneCh := make(chan bool)
-	propose := func(client *Agent, value string) {
+	monitor := func(client *Agent) {
 		defer func() {
 			doneCh <- true
 		}()
 
-		start := time.Now()
-		chosen, errProp := client.paxos.Propose([]byte(value), time.Second)
-		if errProp != nil {
-			test.Errorf("could not propose value %s: %v", value, errProp)
+		leader, round, errRefresh := client.election.RefreshLeader(time.Second)
+		if errRefresh != nil {
+			test.Errorf("could not refresh election status: %v", errRefresh)
 			return
 		}
+		test.Logf("last known election leader is %s for round %d", leader,
+			round)
 
-		test.Logf("classic paxos consensus took %v time to choose %s for %s",
-			time.Since(start), chosen, client.name)
-		client.chosen = chosen
+		if leader == "" {
+			newLeader, newRound, errElect := client.election.ElectLeader(time.Second)
+			if errElect != nil {
+				test.Errorf("could not elect new leader: %v", errElect)
+				return
+			}
+			test.Logf("new leader %s is elected for round %d", newLeader,
+				newRound)
+			leader, round = newLeader, newRound
+		}
 	}
-	go propose(agent1, "agent1")
-	go propose(agent2, "agent2")
-	go propose(agent3, "agent3")
-	<-doneCh
-	<-doneCh
-	<-doneCh
 
-	if bytes.Compare(agent1.chosen, agent2.chosen) != 0 ||
-		bytes.Compare(agent2.chosen, agent3.chosen) != 0 ||
-		bytes.Compare(agent3.chosen, agent1.chosen) != 0 {
-		test.Errorf("different values are chosen, which is wrong")
-		return
-	}
+	go monitor(agent1)
+	go monitor(agent2)
+	go monitor(agent3)
+	go monitor(other)
+	<-doneCh
+	<-doneCh
+	<-doneCh
+	<-doneCh
 
 	closeAgent := func(agent *Agent) {
-		rpcList := PaxosRPCList()
-		errUnregister := agent.msn.UnregisterClass("paxos/classic", rpcList...)
+		rpcList := ElectionRPCList()
+		errUnregister := agent.msn.UnregisterClass("algo/election", rpcList...)
 		if errUnregister != nil {
-			test.Errorf("could not unregister paxos instance exports: %v",
-				errUnregister)
+			test.Errorf("could not unregister election exports: %v", errUnregister)
 			return
 		}
 
-		if err := agent.paxos.Close(); err != nil {
+		if err := agent.election.Close(); err != nil {
 			test.Errorf("could not close paxos on %s: %v", agent.name, err)
 			return
 		}
@@ -238,7 +258,9 @@ func TestClassicPaxosConsensus(test *testing.T) {
 			return
 		}
 	}
-	closeAgent(agent1)
-	closeAgent(agent2)
-	closeAgent(agent3)
+	_ = closeAgent
+	// closeAgent(agent1)
+	// closeAgent(agent2)
+	// closeAgent(agent3)
+	// closeAgent(other)
 }

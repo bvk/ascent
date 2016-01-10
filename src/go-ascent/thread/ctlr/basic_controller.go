@@ -46,6 +46,7 @@
 package ctlr
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -53,13 +54,37 @@ import (
 	"go-ascent/base/log"
 )
 
-// BasicToken represents a ticket from the controller.
-type BasicToken struct {
-	name string
+// ClosingFullLock defines an all resource lock for the BasicController.
+type ClosingFullLock struct {
+	*FullLock
+	owner *BasicController
+}
 
-	fullLock *FullLock
+// Unlock releases the lock.
+func (this *ClosingFullLock) Unlock() {
+	if this.FullLock != nil {
+		this.FullLock.Unlock()
+		this.FullLock = nil
+		this.owner.wg.Done()
+	}
+}
 
-	resourceLock *ResourceLock
+// ClosingResourceLock defines a BasicController lock for limited number of
+// resources.
+type ClosingResourceLock struct {
+	*ResourceLock
+	owner *BasicController
+}
+
+// Unlock releases the lock.
+func (this *ClosingResourceLock) Unlock(resourceList ...string) {
+	if this.ResourceLock != nil {
+		this.ResourceLock.Unlock(resourceList...)
+		if resourceList == nil {
+			this.ResourceLock = nil
+			this.owner.wg.Done()
+		}
+	}
 }
 
 // BasicController implements admission control and resource synchronization.
@@ -128,26 +153,24 @@ func (this *BasicController) GetCloseChannel() <-chan struct{} {
 	return this.closeCh
 }
 
-// NewToken acquires requested resources in the given time and returns a token.
-//
-// name: Name of the operation requesting for a token.
-//
-// timeoutCh: Optional timeout for acquiring the token.
-//
-// resourceList: List of resources necessary for this operation. First empty
-//               string, if present, separates the resources into write-access
-//               and read-access groups. Otherwise, all resources are acquired
-//               for write-access.
-//
-// Returns a token and nil on success.
-func (this *BasicController) NewToken(name string, timeoutCh <-chan time.Time,
-	resourceList ...string) (basicToken *BasicToken, status error) {
+// Lock acquires given resources for write access. It will fail with a non-nil
+// error if controller is closed.
+func (this *BasicController) Lock(first string, rest ...string) (
+	*ClosingResourceLock, error) {
 
-	// start := time.Now()
-	// defer func() {
-	// 	this.Infof("acquiring token for %s took %v time", name,
-	//    time.Since(start))
-	// }()
+	return this.TimedLock(math.MaxInt64, first, rest...)
+}
+
+// LockAll locks all resources for write access. It will fail with a non-nil
+// error if controller is closed.
+func (this *BasicController) LockAll() (*ClosingFullLock, error) {
+	return this.TimedLockAll(math.MaxInt64)
+}
+
+// TimedLock acquires exclusive lock on given resources within the given
+// timeout. It will fail with a non-nil error if controller is closed.
+func (this *BasicController) TimedLock(timeout time.Duration, first string,
+	rest ...string) (*ClosingResourceLock, error) {
 
 	this.mutex.Lock()
 	if this.IsClosed() {
@@ -155,54 +178,56 @@ func (this *BasicController) NewToken(name string, timeoutCh <-chan time.Time,
 		return nil, errs.ErrClosed
 	}
 	this.wg.Add(1)
-	if timeoutCh == nil {
+	var timeoutCh <-chan time.Time
+	if timeout == math.MaxInt64 {
 		timerCh := make(chan time.Time)
 		this.timerMap[timerCh] = struct{}{}
 		timeoutCh = timerCh
+	} else {
+		timeoutCh = time.After(timeout)
 	}
 	this.mutex.Unlock()
 
-	token := &BasicToken{name: name}
-	if resourceList == nil {
-		token.fullLock, status = this.resourcer.TimeLockAll(timeoutCh)
-	} else {
-		token.resourceLock, status = this.resourcer.TimeLockResources(timeoutCh,
-			resourceList...)
-	}
-
-	if status != nil {
+	resourceList := []string{first}
+	resourceList = append(resourceList, rest...)
+	resLock, errLock := this.resourcer.TimeLockResources(timeoutCh,
+		resourceList...)
+	if errLock != nil {
 		this.wg.Done()
-		return nil, status
+		return nil, errLock
 	}
-
-	return token, nil
+	lock := &ClosingResourceLock{ResourceLock: resLock, owner: this}
+	return lock, nil
 }
 
-// CloseToken releases a token. It acts as a no op if token was already closed.
-func (this *BasicController) CloseToken(token *BasicToken) {
-	if token.fullLock == nil && token.resourceLock == nil {
-		return
-	}
+// TimedLockAll acquires exclusive lock on all resources within the given
+// timeout. It will fail with a non-nil error if controller is closed.
+func (this *BasicController) TimedLockAll(timeout time.Duration) (
+	*ClosingFullLock, error) {
 
-	this.wg.Done()
-
-	if token.fullLock != nil {
-		token.fullLock.Unlock()
-		token.fullLock = nil
-		return
+	this.mutex.Lock()
+	if this.IsClosed() {
+		this.mutex.Unlock()
+		return nil, errs.ErrClosed
 	}
-	token.resourceLock.Unlock()
-	token.resourceLock = nil
-	return
-}
-
-// ReleaseResources releases one or more resources early without closing the
-// token. Releases must be acquired under the same token name.
-func (this *BasicToken) ReleaseResources(resourceList ...string) {
-	if this.resourceLock == nil {
-		return
+	this.wg.Add(1)
+	var timeoutCh <-chan time.Time
+	if timeout == math.MaxInt64 {
+		timerCh := make(chan time.Time)
+		this.timerMap[timerCh] = struct{}{}
+		timeoutCh = timerCh
+	} else {
+		timeoutCh = time.After(timeout)
 	}
-	this.resourceLock.Unlock(resourceList...)
+	this.mutex.Unlock()
+
+	fullLock, errLock := this.resourcer.TimeLockAll(timeoutCh)
+	if errLock != nil {
+		this.wg.Done()
+		return nil, errLock
+	}
+	lock := &ClosingFullLock{FullLock: fullLock, owner: this}
+	return lock, nil
 }
 
 // ReadLock acquires resources for read-only access. This method can be used

@@ -27,6 +27,8 @@
 package wal
 
 import (
+	"regexp"
+
 	"go-ascent/base/log"
 )
 
@@ -41,15 +43,18 @@ type LSN interface {
 type WriteAheadLog interface {
 	log.Logger
 
-	// ConfigureRecoverer registers a separate recoverer for all records with the
-	// matching user id.  There can only be one recoverer for an uid.
+	// ConfigureRecoverer registers a separate recoverer for all records with an
+	// uid matched through a regular expression. The first recoverer is used if
+	// multiple regexps can match an uid.
 	//
-	// uid: User id for the record.
+	// Records with empty uids are always recovered using default recoverer.
+	//
+	// re: A regular expression to match uids of the records.
 	//
 	// recoverer: Recoverer for the records with matching uid.
 	//
 	// Returns nil on success.
-	ConfigureRecoverer(uid string, recoverer Recoverer) error
+	ConfigureRecoverer(re *regexp.Regexp, recoverer Recoverer) error
 
 	// Recover restores state stored in the wal by calling recoverer methods
 	// repeatedly for each wal record. Recoverer is invoked with the state stored

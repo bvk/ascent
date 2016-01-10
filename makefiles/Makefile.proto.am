@@ -26,6 +26,7 @@ PROTO_DIRS += $(top_srcdir)/src/proto-ascent/msg
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/msg/simple
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/wal
 PROTO_DIRS += $(top_srcdir)/src/proto-ascent/paxos/classic
+PROTO_DIRS += $(top_srcdir)/src/proto-ascent/algo/election
 
 PROTO_FILES = $(foreach dir,$(PROTO_DIRS),$(wildcard $(dir)/*.proto))
 proto-all-local: proto-go-all-local proto-cc-all-local

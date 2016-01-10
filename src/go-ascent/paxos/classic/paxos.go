@@ -27,6 +27,7 @@ package classic
 
 import (
 	"math/rand"
+	"regexp"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,7 @@ import (
 	"go-ascent/base/errs"
 	"go-ascent/base/log"
 	"go-ascent/msg"
+	"go-ascent/paxos"
 	"go-ascent/thread/ctlr"
 	"go-ascent/wal"
 
@@ -45,20 +47,11 @@ import (
 
 // Options defines user configurable items.
 type Options struct {
-	// Number of attempts to retry on propose failures.
-	MaxProposeRetries int
-
 	// Time to wait before retrying a failed proposal with a higher ballot.
 	ProposeRetryInterval time.Duration
 
-	// Time to wait for Phase1 responses from acceptors.
-	Phase1Timeout time.Duration
-
 	// Number of extra acceptors to request for phase1 promises.
 	NumExtraPhase1Acceptors int
-
-	// Time to wait for Phase2 responses from acceptors.
-	Phase2Timeout time.Duration
 
 	// Time to wait for a learner to acknowledge a phase2 vote by the acceptor.
 	LearnTimeout time.Duration
@@ -66,25 +59,13 @@ type Options struct {
 
 // Validate checks if user configuration items are all valid.
 func (this *Options) Validate() (status error) {
-	if this.MaxProposeRetries < 0 {
-		err := errs.NewErrInvalid("propose retry attempts cannot be negative")
-		status = errs.MergeErrors(status, err)
-	}
 	if this.ProposeRetryInterval < time.Millisecond {
 		err := errs.NewErrInvalid("propose retry should wait for at least a " +
 			"millisecond")
 		status = errs.MergeErrors(status, err)
 	}
-	if this.Phase1Timeout < time.Millisecond {
-		err := errs.NewErrInvalid("phase1 timeout must be at least a millisecond")
-		status = errs.MergeErrors(status, err)
-	}
 	if this.NumExtraPhase1Acceptors < 0 {
 		err := errs.NewErrInvalid("number of extra phase1 acceptors cannot be -ve")
-		status = errs.MergeErrors(status, err)
-	}
-	if this.Phase2Timeout < time.Millisecond {
-		err := errs.NewErrInvalid("phase2 timeout must be at least a millisecond")
 		status = errs.MergeErrors(status, err)
 	}
 	if this.LearnTimeout < time.Millisecond {
@@ -160,6 +141,12 @@ type Paxos struct {
 	chosenValue        []byte
 	ballotValueMap     map[int64][]byte
 	ballotAcceptorsMap map[int64]map[string]struct{}
+
+	//
+	// Transient state.
+	//
+
+	watch paxos.Watcher
 }
 
 // PaxosRPCList returns list of rpcs handled by classic paxos objects.
@@ -179,13 +166,14 @@ func (this *Paxos) Initialize(opts *Options, namespace, uid string,
 		return err
 	}
 
-	if err := wal.ConfigureRecoverer(this.uid, this); err != nil {
+	re := regexp.MustCompile(uid)
+	if err := wal.ConfigureRecoverer(re, this); err != nil {
 		this.Errorf("could not configure wal recoverer: %v", err)
 		return err
 	}
 	defer func() {
 		if status != nil {
-			if err := wal.ConfigureRecoverer(this.uid, nil); err != nil {
+			if err := wal.ConfigureRecoverer(re, nil); err != nil {
 				this.Errorf("could not unconfigure wal recoverer: %v", err)
 				status = errs.MergeErrors(status, err)
 			}
@@ -206,7 +194,7 @@ func (this *Paxos) Initialize(opts *Options, namespace, uid string,
 	this.ballotAcceptorsMap = make(map[int64]map[string]struct{})
 	this.learnerAckMap = make(map[int64]map[string]struct{})
 
-	this.Logger = this.NewLogger("classic-paxos:%s-%s", uid, this.msn.UID())
+	this.Logger = this.NewLogger("classic-paxos:%s-%s", this.msn.UID(), uid)
 	this.ctlr.Initialize(this)
 	return nil
 }
@@ -217,7 +205,8 @@ func (this *Paxos) Close() (status error) {
 		return err
 	}
 
-	if err := this.wal.ConfigureRecoverer(this.uid, nil); err != nil {
+	re := regexp.MustCompile(this.uid)
+	if err := this.wal.ConfigureRecoverer(re, nil); err != nil {
 		this.Errorf("could not unconfigure wal recoverer: %v", err)
 		status = errs.MergeErrors(status, err)
 	}
@@ -240,14 +229,13 @@ func (this *Paxos) Close() (status error) {
 func (this *Paxos) Configure(proposerList, acceptorList,
 	learnerList []string) error {
 
-	token, errToken := this.ctlr.NewToken("ConfigureAgents", nil, /* timeout */
-		"config")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.LockAll()
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
-	if len(this.proposerList) > 0 {
+	if this.majoritySize > 0 {
 		this.Errorf("paxos instance is already configured")
 		return errs.ErrExist
 	}
@@ -281,6 +269,7 @@ func (this *Paxos) Configure(proposerList, acceptorList,
 	for _, acceptor := range acceptors {
 		if acceptor == self {
 			isAcceptor = true
+			break
 		}
 	}
 
@@ -311,15 +300,7 @@ func (this *Paxos) Configure(proposerList, acceptorList,
 		config.ProposerIndex = proto.Int32(int32(proposerIndex))
 	}
 
-	record := thispb.WALRecord{}
-	record.ConfigChange = &config
-	if _, err := wal.SyncChangeProto(this.wal, this.uid, &record); err != nil {
-		this.Errorf("could not append wal record: %v", err)
-		return err
-	}
-
-	this.doRestoreConfig(&config)
-	return nil
+	return this.doUpdateConfig(&config)
 }
 
 // RecoverCheckpoint recovers state from a checkpoint record.
@@ -407,6 +388,11 @@ func (this *Paxos) TakeCheckpoint() error {
 	lock := this.ctlr.ReadLockAll()
 	defer lock.Unlock()
 
+	if this.MajoritySize() < 0 {
+		this.Errorf("classic paxos instance is not yet configured")
+		return errs.ErrInvalid
+	}
+
 	checkpoint := thispb.Checkpoint{}
 
 	config := thispb.Configuration{}
@@ -472,6 +458,31 @@ func (this *Paxos) MajoritySize() int {
 	return int(atomic.LoadInt32(&this.majoritySize))
 }
 
+// ConsensusResult returns the result of paxos consensus if available.
+func (this *Paxos) ConsensusResult() []byte {
+	lock := this.ctlr.ReadLock("learner")
+	defer lock.Unlock()
+
+	return this.chosenValue
+}
+
+// SetLearnerWatch configures a watch on the learners. Existing watch, if any,
+// will be replaced.
+func (this *Paxos) SetLearnerWatch(watch paxos.Watcher) error {
+	if !this.IsLearner() {
+		return errs.ErrInvalid
+	}
+
+	lock, errLock := this.ctlr.Lock("learner")
+	if errLock != nil {
+		return errLock
+	}
+	defer lock.Unlock()
+
+	this.watch = watch
+	return nil
+}
+
 // ProposeRPC handles ClassicPaxos.Propose rpc.
 func (this *Paxos) ProposeRPC(header *msgpb.Header,
 	request *thispb.ProposeRequest) (status error) {
@@ -503,32 +514,28 @@ func (this *Paxos) ProposeRPC(header *msgpb.Header,
 		lock.Unlock()
 	}
 
-	// Propose operation modifies proposal ballot number, so acquire a token for
-	// write access.
-	token, errToken := this.ctlr.NewToken("ProposeRPC", nil, /* timeout */
-		"proposer", "config")
-	if errToken != nil {
-		return errToken
-	}
-	defer this.ctlr.CloseToken(token)
-
 	var chosen []byte
 	proposal := request.GetProposedValue()
-	for ii := 0; chosen == nil && ii < this.opts.MaxProposeRetries; ii++ {
+	for ii := 0; chosen == nil && msg.RequestTimeout(header) > 0; ii++ {
 		if ii > 0 {
 			time.Sleep(this.opts.ProposeRetryInterval)
 		}
 
 		// Get the next proposal ballot number.
-		ballot, errNext := this.getNextProposalBallot()
+		ballot, errNext := this.GetNextProposalBallot(msg.RequestTimeout(header))
 		if errNext != nil {
 			this.Errorf("could not select higher ballot: %v", errNext)
 			return errNext
 		}
 		this.Infof("using ballot number %d for the proposal", ballot)
 
+		lock := this.ctlr.ReadLock("config")
+		phase1AcceptorList := this.getPhase1AcceptorList(ballot)
+		lock.Unlock()
+
 		// Collect phase1 promises from majority number of acceptors.
-		votedValue, acceptorList, errPhase1 := this.doPhase1(ballot)
+		votedValue, acceptorList, errPhase1 := this.doPhase1(header, ballot,
+			phase1AcceptorList)
 		if errPhase1 != nil {
 			this.Warningf("could not complete paxos phase1: %v", errPhase1)
 			continue
@@ -542,7 +549,7 @@ func (this *Paxos) ProposeRPC(header *msgpb.Header,
 		}
 
 		// Collect phase2 votes from majority number of acceptors.
-		errPhase2 := this.doPhase2(ballot, value, acceptorList)
+		errPhase2 := this.doPhase2(header, ballot, value, acceptorList)
 		if errPhase2 != nil {
 			this.Warningf("could not complete paxos phase2: %v", errPhase2)
 			continue
@@ -554,22 +561,18 @@ func (this *Paxos) ProposeRPC(header *msgpb.Header,
 	}
 
 	if chosen == nil {
-		this.Errorf("could not propose value %s in %d attempts",
-			proposal, this.opts.MaxProposeRetries)
+		this.Errorf("could not propose value %s", proposal)
 		return errs.ErrRetry
 	}
-
-	// Close the token, because we are done with the proposal ballot.
-	this.ctlr.CloseToken(token)
 
 	// If local node is a learner, update him with the consensus result directly.
 	defer func() {
 		if this.IsLearner() {
-			token, errToken := this.ctlr.NewToken("UpdateLearner", nil, "learner")
-			if errToken != nil {
+			lock, errLock := this.ctlr.Lock("learner")
+			if errLock != nil {
 				return
 			}
-			defer this.ctlr.CloseToken(token)
+			defer lock.Unlock()
 
 			change := thispb.LearnerChange{}
 			change.ChosenValue = chosen
@@ -602,12 +605,12 @@ func (this *Paxos) Phase1RPC(header *msgpb.Header,
 		return errs.ErrInvalid
 	}
 
-	token, errToken := this.ctlr.NewToken("Phase1RPC", nil, /* timeout */
+	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header),
 		"acceptor")
-	if errToken != nil {
-		return errToken
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	clientID := header.GetMessengerId()
 	respond := func() error {
@@ -663,12 +666,12 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 		return errs.ErrInvalid
 	}
 
-	token, errToken := this.ctlr.NewToken("Phase2RPC", nil, /* timeout */
+	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header),
 		"acceptor")
-	if errToken != nil {
-		return errToken
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	clientID := header.GetMessengerId()
 	respond := func() error {
@@ -712,11 +715,11 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 		return err
 	}
 
-	this.Infof("this acceptor has voted for %s in ballot %s", ballot, value)
+	this.Infof("this acceptor has voted for %d in ballot %s", ballot, value)
 	if err := respond(); err != nil {
 		return err
 	}
-	this.ctlr.CloseToken(token)
+	lock.Unlock()
 
 	// Send a notification to all learners.
 	_ = this.NotifyAllLearners(ballot, value, this.opts.LearnTimeout)
@@ -732,12 +735,12 @@ func (this *Paxos) LearnRPC(header *msgpb.Header,
 		return errs.ErrInvalid
 	}
 
-	token, errToken := this.ctlr.NewToken("LearnRPC", nil, /* timeout */
+	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header),
 		"learner")
-	if errToken != nil {
-		return errToken
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	acceptor := header.GetMessengerId()
 
@@ -831,11 +834,11 @@ func (this *Paxos) NotifyLocalLearner(ballot int64, value []byte) error {
 		return nil
 	}
 
-	token, errToken := this.ctlr.NewToken("NotifyLocalLearner", nil, "learner")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("learner")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	change := thispb.LearnerChange{}
 	change.VotedBallot = proto.Int64(ballot)
@@ -879,7 +882,7 @@ func (this *Paxos) NotifyAllLearners(ballot int64, value []byte,
 
 	// Send notification to all learners.
 	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
-		"ClassicPaxos.Learn")
+		"ClassicPaxos.Learn", this.opts.LearnTimeout)
 	count, errSend := msg.SendAllProto(this.msn, learnerList, reqHeader,
 		&message)
 	if errSend != nil {
@@ -889,12 +892,9 @@ func (this *Paxos) NotifyAllLearners(ballot int64, value []byte,
 
 	// Wait for responses from all learners.
 	learnerSet := this.learnerAckMap[ballot]
-	deadline := time.Now().Add(timeout)
 	for ii := 0; ii < count && len(learnerSet) < len(learnerList); ii++ {
-		timeout = deadline.Sub(time.Now())
 		message := thispb.PaxosMessage{}
-		resHeader, errRecv := msg.ReceiveProto(this.msn, reqHeader, timeout,
-			&message)
+		resHeader, errRecv := msg.ReceiveProto(this.msn, reqHeader, &message)
 		if errRecv != nil {
 			this.Warningf("could not receive learner responses: %v", errRecv)
 			break
@@ -949,7 +949,7 @@ func (this *Paxos) Propose(value []byte, timeout time.Duration) (
 	message := thispb.PaxosMessage{}
 	message.ProposeRequest = &request
 	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
-		"ClassicPaxos.Propose")
+		"ClassicPaxos.Propose", timeout)
 	errSend := msg.SendProto(this.msn, proposer, reqHeader, &message)
 	if errSend != nil {
 		this.Errorf("could not send propose request to %s: %v", proposer, errSend)
@@ -957,7 +957,7 @@ func (this *Paxos) Propose(value []byte, timeout time.Duration) (
 	}
 
 	// Wait for the response.
-	_, errRecv := msg.ReceiveProto(this.msn, reqHeader, timeout, &message)
+	_, errRecv := msg.ReceiveProto(this.msn, reqHeader, &message)
 	if errRecv != nil {
 		this.Errorf("could not receive propose response from %s: %v", proposer,
 			errRecv)
@@ -975,8 +975,19 @@ func (this *Paxos) Propose(value []byte, timeout time.Duration) (
 
 ///////////////////////////////////////////////////////////////////////////////
 
-// getNextProposalBallot return the next higher ballot for local proposer.
-func (this *Paxos) getNextProposalBallot() (int64, error) {
+// GetNextProposalBallot return the next higher ballot for local proposer.
+func (this *Paxos) GetNextProposalBallot(timeout time.Duration) (
+	int64, error) {
+
+	lock, errLock := this.ctlr.TimedLock(timeout, "proposer")
+	if errLock != nil {
+		return -1, errLock
+	}
+	defer lock.Unlock()
+	return this.doGetNextProposalBallot()
+}
+
+func (this *Paxos) doGetNextProposalBallot() (int64, error) {
 	nextProposalBallot := this.proposalBallot
 	if this.proposalBallot < 0 {
 		nextProposalBallot = int64(this.proposerIndex)
@@ -1006,17 +1017,18 @@ func (this *Paxos) getPhase1AcceptorList(ballot int64) []string {
 }
 
 // doPhase1 performs classic paxos phase1 steps.
-func (this *Paxos) doPhase1(ballot int64) ([]byte, []string, error) {
+func (this *Paxos) doPhase1(ctxHeader *msgpb.Header, ballot int64,
+	phase1AcceptorList []string) ([]byte, []string, error) {
+
 	phase1request := thispb.Phase1Request{}
 	phase1request.BallotNumber = proto.Int64(ballot)
 	message := thispb.PaxosMessage{}
 	message.Phase1Request = &phase1request
 
-	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
-		"ClassicPaxos.Phase1")
+	reqHeader := msg.NewNestedRequest(this.msn, ctxHeader, this.namespace,
+		this.uid, "ClassicPaxos.Phase1")
 	defer this.msn.CloseMessage(reqHeader)
 
-	phase1AcceptorList := this.getPhase1AcceptorList(ballot)
 	count, errSend := msg.SendAllProto(this.msn, phase1AcceptorList, reqHeader,
 		&message)
 	if errSend != nil && count < this.MajoritySize() {
@@ -1031,13 +1043,9 @@ func (this *Paxos) doPhase1(ballot int64) ([]byte, []string, error) {
 	var maxVotedValue []byte
 	responseMap := make(map[string]*thispb.Phase1Response)
 
-	deadline := time.Now().Add(this.opts.Phase1Timeout)
 	for ii := 0; ii < count && len(responseMap) < this.MajoritySize(); ii++ {
-		timeLeft := deadline.Sub(time.Now())
-
 		message := thispb.PaxosMessage{}
-		resHeader, errRecv := msg.ReceiveProto(this.msn, reqHeader, timeLeft,
-			&message)
+		resHeader, errRecv := msg.ReceiveProto(this.msn, reqHeader, &message)
 		if errRecv != nil {
 			this.Warningf("could not receive more phase1 responses for %s: %v",
 				reqHeader, errRecv)
@@ -1107,8 +1115,8 @@ func (this *Paxos) doPhase1(ballot int64) ([]byte, []string, error) {
 }
 
 // doPhase2 performs classic paxos phase2 steps.
-func (this *Paxos) doPhase2(ballot int64, value []byte,
-	acceptorList []string) error {
+func (this *Paxos) doPhase2(ctxHeader *msgpb.Header, ballot int64,
+	value []byte, acceptorList []string) error {
 
 	phase2request := thispb.Phase2Request{}
 	phase2request.BallotNumber = proto.Int64(ballot)
@@ -1116,7 +1124,7 @@ func (this *Paxos) doPhase2(ballot int64, value []byte,
 	message := thispb.PaxosMessage{}
 	message.Phase2Request = &phase2request
 
-	header := this.msn.NewRequest(this.namespace, this.uid,
+	header := msg.NewNestedRequest(this.msn, ctxHeader, this.namespace, this.uid,
 		"ClassicPaxos.Phase2")
 	defer this.msn.CloseMessage(header)
 
@@ -1129,12 +1137,9 @@ func (this *Paxos) doPhase2(ballot int64, value []byte,
 	this.Infof("send phase2 request %s to acceptors: %v", header, acceptorList)
 
 	responseMap := make(map[string]*thispb.Phase2Response)
-	deadline := time.Now().Add(this.opts.Phase2Timeout)
 	for ii := 0; ii < count && len(responseMap) < this.MajoritySize(); ii++ {
-		timeLeft := deadline.Sub(time.Now())
 		message := thispb.PaxosMessage{}
-		resHeader, errRecv := msg.ReceiveProto(this.msn, header, timeLeft,
-			&message)
+		resHeader, errRecv := msg.ReceiveProto(this.msn, header, &message)
 		if errRecv != nil {
 			break
 		}
@@ -1181,6 +1186,15 @@ func (this *Paxos) doPhase2(ballot int64, value []byte,
 ///////////////////////////////////////////////////////////////////////////////
 
 func (this *Paxos) doUpdateConfig(change *thispb.Configuration) error {
+	if !this.wal.IsRecovering() {
+		record := thispb.WALRecord{}
+		record.ConfigChange = change
+		if _, err := wal.SyncChangeProto(this.wal, this.uid, &record); err != nil {
+			this.Errorf("could not append config change wal record: %v", err)
+			return err
+		}
+	}
+
 	this.doRestoreConfig(change)
 	return nil
 }
@@ -1257,6 +1271,10 @@ func (this *Paxos) doUpdateLearner(change *thispb.LearnerChange) error {
 		this.chosenValue = change.GetChosenValue()
 		this.Infof("consensus result learned from proposer is %s",
 			this.chosenValue)
+
+		if this.watch != nil {
+			this.watch.ConsensusUpdate(this.uid, -1, this.chosenValue)
+		}
 		return nil
 	}
 
@@ -1274,6 +1292,10 @@ func (this *Paxos) doUpdateLearner(change *thispb.LearnerChange) error {
 	if len(acceptorSet) >= this.MajoritySize() {
 		this.chosenValue = votedValue
 		this.Infof("consensus result learned through votes is %s", votedValue)
+
+		if this.watch != nil {
+			this.watch.ConsensusUpdate(this.uid, -1, this.chosenValue)
+		}
 	}
 	return nil
 }

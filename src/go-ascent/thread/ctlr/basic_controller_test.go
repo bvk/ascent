@@ -47,9 +47,9 @@ func TestBasicController(test *testing.T) {
 			return
 		}
 
-		token, errToken := controller.NewToken("any", nil /* timeout */)
-		if !errs.IsClosed(errToken) {
-			test.Errorf("controller issued token %v after it is closed", token)
+		lock, errLock := controller.LockAll()
+		if !errs.IsClosed(errLock) {
+			test.Errorf("controller issued lock %v after it is closed", lock)
 			return
 		}
 
@@ -58,42 +58,41 @@ func TestBasicController(test *testing.T) {
 		foobar.Unlock()
 	}()
 
-	token1, errToken1 := controller.NewToken("foo", nil)
-	if errToken1 != nil {
-		test.Errorf("could not acquire token1: %v", errToken1)
-		return
-	}
-	token2, errToken2 := controller.NewToken("bar", time.After(time.Millisecond))
-	if !errs.IsTimeout(errToken2) {
-		test.Errorf("second token %v is issued while token1 %v is active",
-			token2, token1)
-		return
-	}
-	controller.CloseToken(token1)
-
-	token3, errToken3 := controller.NewToken("baz", time.After(time.Millisecond),
-		"a")
-	if errToken3 != nil {
-		test.Errorf("could not acquire token3: %v", errToken3)
+	lock1, errLock1 := controller.LockAll()
+	if errLock1 != nil {
+		test.Errorf("could not acquire lock1: %v", errLock1)
 		return
 	}
 
-	token4, errToken4 := controller.NewToken("foo", time.After(time.Millisecond),
-		"b")
-	if errToken4 != nil {
-		test.Errorf("could not acquire token4: %v", errToken4)
+	lock2, errLock2 := controller.TimedLockAll(time.Millisecond)
+	if !errs.IsTimeout(errLock2) {
+		test.Errorf("second lock %v is issued while lock1 %v is active",
+			lock2, lock1)
+		return
+	}
+	lock1.Unlock()
+
+	lock3, errLock3 := controller.TimedLock(time.Millisecond, "a")
+	if errLock3 != nil {
+		test.Errorf("could not acquire lock3: %v", errLock3)
 		return
 	}
 
-	token5, errToken5 := controller.NewToken("bar", time.After(time.Millisecond))
-	if errToken5 == nil {
-		test.Errorf("lock all token %v issue while tokens %v and %v are active",
-			token5, token3, token4)
+	lock4, errLock4 := controller.TimedLock(time.Millisecond, "b")
+	if errLock4 != nil {
+		test.Errorf("could not acquire lock4: %v", errLock4)
 		return
 	}
 
-	controller.CloseToken(token3)
-	controller.CloseToken(token4)
+	lock5, errLock5 := controller.TimedLockAll(time.Millisecond)
+	if errLock5 == nil {
+		test.Errorf("lock all lock %v issue while locks %v and %v are active",
+			lock5, lock3, lock4)
+		return
+	}
+
+	lock3.Unlock()
+	lock4.Unlock()
 
 	foo := controller.ReadLock("foo")
 	bar := controller.ReadLock("bar")

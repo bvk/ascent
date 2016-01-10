@@ -37,7 +37,7 @@ go-env:
 # options to the 'go test' command. GOTESTFLAGS name is picked to be
 # similar to CFLAGS, CPPFLAGS, etc.
 go-check-local:
-	go test $(GOTESTFLAGS) go-ascent/...
+	go test -timeout 30s $(GOTESTFLAGS) go-ascent/...
 
 # Build rule to compile all Go packages and binaries as part of make. Since go
 # compiler takes care of dependency analysis, we always run go install.

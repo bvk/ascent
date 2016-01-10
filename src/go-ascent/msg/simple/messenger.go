@@ -25,6 +25,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"strings"
@@ -234,11 +235,11 @@ func (this *Messenger) Close() (status error) {
 
 // Start activates the messenger by opening all its listeners.
 func (this *Messenger) Start() error {
-	token, errToken := this.ctlr.NewToken("Start", nil /* timeout */)
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.LockAll()
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	if this.started {
 		return errs.ErrStarted
@@ -259,11 +260,11 @@ func (this *Messenger) Start() error {
 // all open transports, so no further messages can be sent or received using
 // the messenger.
 func (this *Messenger) Stop() error {
-	token, errToken := this.ctlr.NewToken("Stop", nil /* timeout */)
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.LockAll()
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	if !this.started {
 		return errs.ErrStopped
@@ -291,12 +292,11 @@ func (this *Messenger) UID() string {
 //
 // Returns nil on success.
 func (this *Messenger) AddListenerAddress(newAddress string) error {
-	token, errToken := this.ctlr.NewToken("AddListenerAddress",
-		nil /* timeout */, "this.state", "this.listenerMap")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.state", "this.listenerMap")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	// Check for duplicates.
 	for _, address := range this.state.ListenerAddressList {
@@ -327,8 +327,6 @@ func (this *Messenger) AddListenerAddress(newAddress string) error {
 		}
 	}
 
-	// TODO: Make these changes persistent using wal.
-
 	this.state.ListenerAddressList = append(this.state.ListenerAddressList,
 		newAddress)
 	return nil
@@ -344,12 +342,11 @@ func (this *Messenger) AddListenerAddress(newAddress string) error {
 func (this *Messenger) AddPeerAddress(peerID string,
 	addressList []string) error {
 
-	token, errToken := this.ctlr.NewToken("AddPeerAddress", nil, /* timeout */
-		"this.state")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.state")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	// Check the address list.
 	validList, unsupportedList, errCheck := this.CheckPeerAddressList(peerID,
@@ -378,8 +375,6 @@ func (this *Messenger) AddPeerAddress(peerID string,
 		}
 	}
 
-	// TODO: Make these changes persistent using an wal.
-
 	newPeer := &thispb.Peer{}
 	newPeer.MessengerId = proto.String(peerID)
 	newPeer.AddressList = append(newPeer.AddressList, addressList...)
@@ -392,6 +387,7 @@ func (this *Messenger) NewPost() *msgpb.Header {
 	header := &msgpb.Header{}
 	header.MessageId = proto.Int64(atomic.AddInt64(&this.lastMessageID, 1))
 	header.MessengerId = proto.String(this.uid)
+	header.CreateTimestampNsecs = proto.Int64(time.Now().UnixNano())
 	return header
 }
 
@@ -414,9 +410,11 @@ func (this *Messenger) NewResponse(request *msgpb.Header) *msgpb.Header {
 //
 // methodName: Function or method name for the target operation.
 //
+// timeout: A timeout to complete the request operations.
+//
 // Returns a message header.
-func (this *Messenger) NewRequest(classID, objectID,
-	methodName string) *msgpb.Header {
+func (this *Messenger) NewRequest(classID, objectID, methodName string,
+	timeout time.Duration) *msgpb.Header {
 
 	header := this.NewPost()
 	header.Request = &msgpb.Header_Request{}
@@ -425,6 +423,12 @@ func (this *Messenger) NewRequest(classID, objectID,
 	if len(objectID) > 0 {
 		header.Request.ObjectId = proto.String(objectID)
 	}
+	if timeout == 0 {
+		header.Request.TimeoutNsecs = proto.Int64(math.MaxInt64)
+	} else {
+		header.Request.TimeoutNsecs = proto.Int64(int64(timeout))
+	}
+
 	//
 	// Create a response channel for the request. Response channel is where
 	// responses are stored for the request.
@@ -436,12 +440,11 @@ func (this *Messenger) NewRequest(classID, objectID,
 	// acquiring the lock multiple times, which adds unnecessary overhead,
 	// because we update requestMap with response channel only once.
 	//
-	token, errToken := this.ctlr.NewToken("NewRequest", nil, /* timeout */
-		"this.requestMap")
-	if errToken != nil {
+	lock, errLock := this.ctlr.Lock("this.requestMap")
+	if errLock != nil {
 		return nil
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	requestID := header.GetMessageId()
 	if _, ok := this.requestMap[requestID]; !ok {
@@ -468,12 +471,11 @@ func (this *Messenger) CloseMessage(header *msgpb.Header) error {
 	//
 	// Remove the request and its response channel from live requests map.
 	//
-	token, errToken := this.ctlr.NewToken("CloseMessage", nil, /* timeout */
-		"this.requestMap")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.requestMap")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	requestID := header.GetMessageId()
 	responseCh, found := this.requestMap[requestID]
@@ -498,12 +500,11 @@ func (this *Messenger) CloseMessage(header *msgpb.Header) error {
 func (this *Messenger) NewPeer(peerID string, addressList []string) (
 	*Peer, error) {
 
-	token, errToken := this.ctlr.NewToken("NewPeer", nil, /* timeout */
-		"this.peerMap")
-	if errToken != nil {
-		return nil, errToken
+	lock, errLock := this.ctlr.Lock("this.peerMap")
+	if errLock != nil {
+		return nil, errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	peer, found := this.peerMap[peerID]
 	if found {
@@ -519,12 +520,11 @@ func (this *Messenger) NewPeer(peerID string, addressList []string) (
 //
 // Returns remote messenger instance.
 func (this *Messenger) OpenPeer(peerID string) (*Peer, error) {
-	token, errToken := this.ctlr.NewToken("OpenPeer", nil, /* timeout */
-		"this.peerMap", "this.state")
-	if errToken != nil {
-		return nil, errToken
+	lock, errLock := this.ctlr.Lock("this.peerMap", "this.state")
+	if errLock != nil {
+		return nil, errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	peer, found := this.peerMap[peerID]
 	if found {
@@ -547,12 +547,11 @@ func (this *Messenger) OpenPeer(peerID string) (*Peer, error) {
 //
 // Returns nil on success.
 func (this *Messenger) ClosePeer(peerID string) (status error) {
-	token, errToken := this.ctlr.NewToken("ClosePeer", nil, /* timeout */
-		"this.peerMap", peerID)
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.peerMap", peerID)
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	peer, found := this.peerMap[peerID]
 	if !found {
@@ -561,7 +560,7 @@ func (this *Messenger) ClosePeer(peerID string) (status error) {
 
 	delete(this.peerMap, peerID)
 
-	token.ReleaseResources("this.peerMap")
+	lock.Unlock("this.peerMap")
 
 	close(peer.outCh)
 	for tport := range peer.transportMap {
@@ -621,18 +620,16 @@ func (this *Messenger) Send(targetID string, header *msgpb.Header,
 //
 // request: Message header of a live request.
 //
-// timeout: Time to wait for a response.
-//
 // Returns response message header and response data on success.
-func (this *Messenger) Receive(request *msgpb.Header, timeout time.Duration) (
-	*msgpb.Header, []byte, error) {
+func (this *Messenger) Receive(request *msgpb.Header) (*msgpb.Header,
+	[]byte, error) {
 
-	token, errToken := this.ctlr.NewToken("Receive", time.After(timeout),
-		"this.requestMap")
-	if errToken != nil {
-		return nil, nil, errToken
+	timeout := msg.RequestTimeout(request)
+	lock, errLock := this.ctlr.TimedLock(timeout, "this.requestMap")
+	if errLock != nil {
+		return nil, nil, errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	requestID := request.GetMessageId()
 	responseCh, found := this.requestMap[requestID]
@@ -641,8 +638,8 @@ func (this *Messenger) Receive(request *msgpb.Header, timeout time.Duration) (
 		return nil, nil, errs.ErrNotExist
 	}
 
-	// Close the token early to unblock others.
-	this.ctlr.CloseToken(token)
+	// Close the lock early to unblock others.
+	lock.Unlock()
 
 	// Perform a non-blocking receive if timeout is zero.
 	if timeout == 0 {
@@ -739,7 +736,6 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 	// Set the negotiation deadline.
 	start := time.Now()
 	deadline := start.Add(timeout)
-	timeoutCh := time.After(timeout)
 	connection.SetDeadline(deadline)
 	defer connection.SetDeadline(time.Time{})
 
@@ -836,14 +832,13 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 	}
 
 	// Negotiation was successful, so add the transport to the remote messenger.
-	token, errToken := this.ctlr.NewToken("NewTransport", timeoutCh,
-		remoteID)
-	if errToken != nil {
-		this.Errorf("could not get token for opening new transport %s: %v",
-			tport.name, errToken)
-		return nil, errToken
+	lock, errLock := this.ctlr.TimedLock(deadline.Sub(time.Now()), remoteID)
+	if errLock != nil {
+		this.Errorf("could not get lock for opening new transport %s: %v",
+			tport.name, errLock)
+		return nil, errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	peer.transportMap[tport] = struct{}{}
 	this.Infof("added new transport %s connecting to peer %s", tport.name,
@@ -864,13 +859,12 @@ func (this *Messenger) NewTransport(listener string, connection net.Conn,
 func (this *Messenger) CloseTransport(peer *Peer, tport *Transport) (
 	status error) {
 
-	token, errToken := this.ctlr.NewToken("CloseTransport", nil, /* timeout */
-		peer.peerID)
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock(peer.peerID)
+	if errLock != nil {
+		return errLock
 	}
 	delete(peer.transportMap, tport)
-	this.ctlr.CloseToken(token)
+	lock.Unlock()
 
 	if tport.connection == nil {
 		return nil
@@ -896,12 +890,11 @@ func (this *Messenger) CloseTransport(peer *Peer, tport *Transport) (
 func (this *Messenger) RegisterClass(classID string, handler msg.Handler,
 	methodList ...string) error {
 
-	token, errToken := this.ctlr.NewToken("RegisterClass", nil, /* timeout */
-		"this.exportMap")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.exportMap")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	methodMap, found := this.exportMap[classID]
 	if !found {
@@ -940,12 +933,11 @@ func (this *Messenger) RegisterClass(classID string, handler msg.Handler,
 func (this *Messenger) UnregisterClass(classID string,
 	methodList ...string) error {
 
-	token, errToken := this.ctlr.NewToken("UnregisterClass", nil, /* timeout */
-		"this.exportMap")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.exportMap")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	methodMap, found := this.exportMap[classID]
 	if !found {
@@ -1040,12 +1032,11 @@ func (this *Messenger) DispatchPost(header *msgpb.Header, data []byte) error {
 func (this *Messenger) DispatchResponse(header *msgpb.Header,
 	data []byte) error {
 
-	token, errToken := this.ctlr.NewToken("DispatchResponse", nil, /* timeout */
-		"this.requestMap")
-	if errToken != nil {
-		return errToken
+	lock, errLock := this.ctlr.Lock("this.requestMap")
+	if errLock != nil {
+		return errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	response := header.GetResponse()
 	requestID := response.GetRequestId()
@@ -1056,8 +1047,8 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 		return errs.ErrNotExist
 	}
 
-	// Close the token early to release the resources.
-	this.ctlr.CloseToken(token)
+	// Close the lock early to release the resources.
+	lock.Unlock()
 
 	entry := &Entry{header: header, data: data}
 
@@ -1099,12 +1090,11 @@ func (this *Messenger) DispatchRequest(header *msgpb.Header,
 		}
 	}()
 
-	token, errToken := this.ctlr.NewToken("DispatchRequest", nil, /* timeout */
-		"this.exportMap")
-	if errToken != nil {
-		return errToken, nil
+	lock, errLock := this.ctlr.Lock("this.exportMap")
+	if errLock != nil {
+		return errLock, nil
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	request := header.GetRequest()
 	classID := request.GetClassId()
@@ -1133,8 +1123,8 @@ func (this *Messenger) DispatchRequest(header *msgpb.Header,
 		return msnStatus, nil
 	}
 
-	// Close the token early to release the resources.
-	this.ctlr.CloseToken(token)
+	// Close the lock early to release the resources.
+	lock.Unlock()
 
 	appStatus = handler.Dispatch(header, data)
 	if appStatus != nil {
@@ -1158,13 +1148,12 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 	// blocked.
 	resource := fmt.Sprintf("flush-%s", peer.peerID)
 
-	timeoutCh := time.After(this.opts.MaxWriteTimeout)
-	token, errToken := this.ctlr.NewToken("FlushMessages", timeoutCh,
+	lock, errLock := this.ctlr.TimedLock(this.opts.MaxWriteTimeout,
 		peer.peerID, resource)
-	if errToken != nil {
-		return 0, errToken
+	if errLock != nil {
+		return 0, errLock
 	}
-	defer this.ctlr.CloseToken(token)
+	defer lock.Unlock()
 
 	// Make a copy of open transports or peer addresses.
 	var addressList []string
@@ -1187,8 +1176,8 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 		}
 	}
 
-	// Close the token to release the resources.
-	token.ReleaseResources(peer.peerID)
+	// Close the lock to release the resources.
+	lock.Unlock(peer.peerID)
 
 	// Open new transports if no open transports exist.
 	if len(transportList) == 0 {
@@ -1225,6 +1214,7 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 			return count, errEncode
 		}
 
+		this.Infof("=> %s | %s", peer.peerID, entry.header)
 		deadline := time.Now().Add(this.opts.MaxWriteTimeout)
 		tport.connection.SetWriteDeadline(deadline)
 		if _, err := tport.connection.Write(packet); err != nil {
@@ -1235,7 +1225,6 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 			return count, err
 		}
 		tport.connection.SetWriteDeadline(time.Time{})
-		this.Infof("=> %s to %s", entry.header, peer.peerID)
 		count++
 	}
 	return count, nil
@@ -1515,7 +1504,7 @@ func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 			return
 		}
 		header.ReceiverTimestampNsecs = proto.Int64(time.Now().UnixNano())
-		this.Infof("<= %s from %s", header, peer.peerID)
+		this.Infof("<= %s | %s", peer.peerID, header)
 		if err := this.DispatchIncoming(peer.peerID, header, data); err != nil {
 			this.Warningf("could not dispatch incoming message %s from %s "+
 				"(ignored): %v", header, tport.name, err)

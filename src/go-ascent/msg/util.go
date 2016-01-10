@@ -119,10 +119,10 @@ func SendResponseProto(msn Messenger, reqHeader *msgpb.Header,
 
 // ReceiveProto receives a protobuf object as the user data response to a
 // request.
-func ReceiveProto(msn Messenger, header *msgpb.Header, timeout time.Duration,
-	data proto.Message) (*msgpb.Header, error) {
+func ReceiveProto(msn Messenger, header *msgpb.Header, data proto.Message) (
+	*msgpb.Header, error) {
 
-	resHeader, resData, errRecv := msn.Receive(header, timeout)
+	resHeader, resData, errRecv := msn.Receive(header)
 	if errRecv != nil {
 		msn.Errorf("could not receive responses for %s: %v", header, errRecv)
 		return nil, errRecv
@@ -146,4 +146,39 @@ func ReceiveProto(msn Messenger, header *msgpb.Header, timeout time.Duration,
 		return nil, err
 	}
 	return resHeader, nil
+}
+
+// RequestTimeout returns the pending time left to complete the operations
+// represented by the request header. Timeout is measured from the creation
+// timestamp if the request header is created locally; otherwise, timeout is
+// measured from the time this request is received from the socket (optionally,
+// removing any transfer latency if available.)
+func RequestTimeout(header *msgpb.Header) time.Duration {
+	if header.Request == nil {
+		// This is not a request.
+		return 0
+	}
+	start := header.GetCreateTimestampNsecs()
+	if header.ReceiverTimestampNsecs != nil {
+		start = header.GetReceiverTimestampNsecs()
+	}
+	request := header.GetRequest()
+	timeout := time.Duration(request.GetTimeoutNsecs())
+	elapsed := time.Now().UnixNano() - start
+	return timeout - time.Duration(elapsed)
+}
+
+// TimeAfter returns a timer channel that ticks when the request timeout is
+// completed.
+func TimeAfter(header *msgpb.Header) <-chan time.Time {
+	return time.After(RequestTimeout(header))
+}
+
+// NewNestedRequest creates a new request header with the pending timeout of
+// another request.
+func NewNestedRequest(msn Messenger, ctxHeader *msgpb.Header,
+	classID, objectID, methodName string) *msgpb.Header {
+
+	timeout := RequestTimeout(ctxHeader)
+	return msn.NewRequest(classID, objectID, methodName, timeout)
 }

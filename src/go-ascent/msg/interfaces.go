@@ -133,8 +133,12 @@ type Messenger interface {
 	//           this request. This is useful, when a single rpc handler is
 	//           handling rpcs for all objects of a specific type.
 	//
+	// timeout: An expected timeout to complete request operations. A zero value
+	//          is considered as no timeout.
+	//
 	// methodName: Name of the request target method.
-	NewRequest(classID, objectID, methodName string) *thispb.Header
+	NewRequest(classID, objectID, methodName string,
+		timeout time.Duration) *thispb.Header
 
 	// NewResponse creates a response to an incoming request.
 	NewResponse(request *thispb.Header) *thispb.Header
@@ -165,12 +169,8 @@ type Messenger interface {
 	//
 	// request: Header for the request message.
 	//
-	// timeout: Timeout for waiting. Since incoming responses are queued, users
-	//          can check for a response asynchronously using zero timeout.
-	//
 	// Returns nil with the incoming message or a non-nil error.
-	Receive(request *thispb.Header, timeout time.Duration) (
-		*thispb.Header, []byte, error)
+	Receive(request *thispb.Header) (*thispb.Header, []byte, error)
 
 	// RegisterClass exports functions using a handler. Either all methods are
 	// exported or none are exported.

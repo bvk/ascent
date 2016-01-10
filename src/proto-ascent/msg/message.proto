@@ -83,6 +83,10 @@ message Header {
 	// Unique object id, if requested operation can be invoked on many
 	// different objects.
 	optional string object_id = 3;
+
+	// A timeout in nanoseconds. It conveys the expected time to complete the
+	// request operations.
+	required int64 timeout_nsecs = 4;
   }
   optional Request request = 4;
 
@@ -103,7 +107,18 @@ message Header {
   }
   optional Response response = 5;
 
-  // Transport time.
-  optional int64 sender_timestamp_nsecs = 6;
-  optional int64 receiver_timestamp_nsecs = 7;
+  // Create timestamp for the message.
+  required int64 create_timestamp_nsecs = 6;;
+
+  // Sender timestamp is set when message is about to be written to the backend
+  // socket. If a message is sent to multiple targets (through different
+  // sockets), they may overwrite this field. If source and destination
+  // messengers are on different hosts, clocks wont be the same, so this
+  // timestamp cannot be interpreted at the destination.
+  optional int64 sender_timestamp_nsecs = 7;
+
+  // Receiver timestamp set when the message is read from the backend
+  // socket. This field is not set for messages created by local messengers
+  // because they are not received from the socket.
+  optional int64 receiver_timestamp_nsecs = 8;
 }
