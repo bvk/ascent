@@ -43,13 +43,14 @@ PROTO_GO_FILES = $(subst .proto,.pb.go,$(PROTO_FILES))
 CLEANFILES += $(PROTO_GO_FILES)
 
 # Each directory with protobuf files turns into one package.
-$(top_srcdir)/pkg/linux_amd64/%.a: $(top_srcdir)/src/%/*.pb.go
-	go install $*
+$(top_srcdir)/pkg/linux_amd64/%.a: $(top_srcdir)/src/%/*.proto
+	PATH=$$PATH:$(top_srcdir)/bin protoc -I$(top_srcdir)/src --go_out=$(top_srcdir)/src $(top_srcdir)/src/$*/*.proto
+	go build $*
 PROTO_GO_PKGS = $(subst /src/,/pkg/linux_amd64/,$(addsuffix .a,$(PROTO_DIRS)))
 CLEANFILES += $(PROTO_GO_PKGS)
 
 # Build Go packages for all proto files.
-proto-go-all-local: $(PROTO_GO_PKGS)
+proto-go-all-local: $(top_srcdir)/bin/protoc-gen-go $(PROTO_GO_PKGS)
 .PHONY: proto-go-all-local
 
 #
@@ -59,7 +60,7 @@ proto-go-all-local: $(PROTO_GO_PKGS)
 # Rule to generate pb.h and pb.cc files from
 $(top_srcdir)/src/gen-cc/%.pb.cc $(top_srcdir)/src/gen-cc/%.pb.h: $(top_srcdir)/src/%.proto
 	mkdir -p $(top_srcdir)/src/gen-cc
-	cd $(top_srcdir)/src && protoc --cpp_out=$(abs_top_srcdir)/src/gen-cc/. $*.proto
+	cd $(top_srcdir)/src && protoc --cpp_out=$(abs_top_srcdir)/src/gen-cc $*.proto
 PROTO_PB_CC_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.cc,$(PROTO_FILES)))
 PROTO_PB_H_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.h,$(PROTO_FILES)))
 PROTO_PB_O_FILES = $(subst /src/,/src/gen-cc/,$(subst .proto,.pb.o,$(PROTO_FILES)))
