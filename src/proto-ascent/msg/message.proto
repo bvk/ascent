@@ -70,7 +70,7 @@ message Header {
 	optional RequestOptions request_options = 4;
 	optional ResponseOptions response_options = 5;
   }
-  optional Request options = 3;
+  optional Options options = 3;
 
   // Request parameters if message is a request.
   message Request {

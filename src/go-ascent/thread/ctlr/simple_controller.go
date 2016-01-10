@@ -112,7 +112,6 @@ func (this *SimpleController) Close() error {
 	default:
 		close(this.closeCh)
 	}
-	this.Wait()
 	return nil
 }
 

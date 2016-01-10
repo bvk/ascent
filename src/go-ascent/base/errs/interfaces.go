@@ -43,6 +43,8 @@ var (
 	ErrIOError  = &SimpleError{Category: "ErrIOError"}
 	ErrTimeout  = &SimpleError{Category: "ErrTimeout"}
 	ErrClosed   = &SimpleError{Category: "ErrClosed"}
+	ErrStarted  = &SimpleError{Category: "ErrStarted"}
+	ErrStopped  = &SimpleError{Category: "ErrStopped"}
 	ErrOverflow = &SimpleError{Category: "ErrOverflow"}
 	ErrCorrupt  = &SimpleError{Category: "ErrCorrupt"}
 
@@ -58,6 +60,8 @@ func IsRetry(err error) bool    { return ErrRetry.isSimilar(err) }
 func IsIOError(err error) bool  { return ErrIOError.isSimilar(err) }
 func IsTimeout(err error) bool  { return ErrTimeout.isSimilar(err) }
 func IsClosed(err error) bool   { return ErrClosed.isSimilar(err) }
+func IsStarted(err error) bool  { return ErrStarted.isSimilar(err) }
+func IsStopped(err error) bool  { return ErrStopped.isSimilar(err) }
 func IsOverflow(err error) bool { return ErrOverflow.isSimilar(err) }
 func IsCorrupt(err error) bool  { return ErrCorrupt.isSimilar(err) }
 
@@ -81,6 +85,10 @@ func MakeErrorFromCategory(category string) *SimpleError {
 		return ErrTimeout
 	case "ErrClosed":
 		return ErrClosed
+	case "ErrStarted":
+		return ErrStarted
+	case "ErrStopped":
+		return ErrStopped
 	case "ErrOverflow":
 		return ErrOverflow
 	case "ErrCorrupt":
@@ -112,6 +120,12 @@ func NewErrTimeout(format string, args ...interface{}) error {
 }
 func NewErrClosed(format string, args ...interface{}) error {
 	return ErrClosed.newErrorf(format, args...)
+}
+func NewErrStarted(format string, args ...interface{}) error {
+	return ErrStarted.newErrorf(format, args...)
+}
+func NewErrStopped(format string, args ...interface{}) error {
+	return ErrStopped.newErrorf(format, args...)
 }
 func NewErrOverflow(format string, args ...interface{}) error {
 	return ErrOverflow.newErrorf(format, args...)
