@@ -38,4 +38,7 @@ message RecordHeader {
 
   // Checksum bytes for the user data.
   required bytes checksum = 2;
+
+  // User id for the record.
+  optional string user_id = 3;
 }

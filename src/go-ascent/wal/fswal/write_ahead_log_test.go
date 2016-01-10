@@ -39,7 +39,7 @@ var userSeed = flag.Int64("user_seed", 0,
 var maxRecordSize = flag.Int("max_record_size", 3*1024,
 	"Maximum wal record size.")
 
-var numTestRecords = flag.Int("num_wal_records", 1024,
+var numTestRecords = flag.Int("num_wal_records", 100,
 	"Number of wal records to append as part of the test.")
 
 type dataStream struct {
@@ -94,12 +94,14 @@ type walState struct {
 	changeList     []string
 }
 
-func (this *walState) RecoverCheckpoint(data []byte) error {
+func (this *walState) RecoverCheckpoint(uid string, data []byte) error {
 	this.checkpointList = append(this.checkpointList, string(data))
 	return nil
 }
 
-func (this *walState) RecoverChange(lsn wal.LSN, data []byte) error {
+func (this *walState) RecoverChange(lsn wal.LSN, uid string,
+	data []byte) error {
+
 	this.changeList = append(this.changeList, string(data))
 	return nil
 }
@@ -163,13 +165,13 @@ func TestRepeatRecoverAppendChanges(test *testing.T) {
 				return nil
 			}
 			for _, record := range state.checkpointList {
-				if err := lwal.AppendCheckpointRecord([]byte(record)); err != nil {
+				if err := lwal.AppendCheckpointRecord("", []byte(record)); err != nil {
 					test.Errorf("could not append checkpoint record: %v", err)
 					return nil
 				}
 			}
 			for _, record := range state.changeList {
-				if err := lwal.AppendCheckpointRecord([]byte(record)); err != nil {
+				if err := lwal.AppendCheckpointRecord("", []byte(record)); err != nil {
 					test.Errorf("could not append checkpoint record: %v", err)
 					return nil
 				}
@@ -181,7 +183,7 @@ func TestRepeatRecoverAppendChanges(test *testing.T) {
 		}
 
 		// After recovery, append one record.
-		if _, err := lwal.SyncChangeRecord([]byte(change)); err != nil {
+		if _, err := lwal.SyncChangeRecord("", []byte(change)); err != nil {
 			test.Errorf("could not append change [%s]: %v", change, err)
 			return nil
 		}

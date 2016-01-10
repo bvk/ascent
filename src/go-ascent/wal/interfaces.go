@@ -35,13 +35,24 @@ type LSN interface {
 // Interface designed to support replicated logs, transactional logs and
 // replicated transactional logs.
 type WriteAheadLog interface {
+	// ConfigureRecoverer registers a separate recoverer for all records with the
+	// matching user id.  There can only be one recoverer for an uid.
+	//
+	// uid: User id for the record.
+	//
+	// recoverer: Recoverer for the records with matching uid.
+	//
+	// Returns nil on success.
+	ConfigureRecoverer(uid string, recoverer Recoverer) error
+
 	// Recover restores state stored in the wal by calling recoverer methods
 	// repeatedly for each wal record. Recoverer is invoked with the state stored
 	// in the recent, committed checkpoint records first followed by the change
 	// records logged after checkpoint is started.
 	//
 	// recoverer: User defined object that know how to restore state from the wal
-	// records.
+	// records. This recoverer receives the records that do not have any private
+	// recoverer configured using ConfigureRecoverer operation.
 	//
 	// Returns an error if wal data couldn't be read or the error returned by
 	// recoverer during recovery if any.
@@ -57,11 +68,13 @@ type WriteAheadLog interface {
 	// In case of restarts, if this record is not recoverable then, no following
 	// record is recovered.
 	//
+	// uid: User id for the record.
+	//
 	// record: User data written to the wal.
 	//
 	// On success, returns a wal-local, monotonically increasing unique id for
 	// the record's position.
-	QueueChangeRecord(data []byte) LSN
+	QueueChangeRecord(uid string, data []byte) LSN
 
 	// AppendChangeRecord atomically appends a record to the wal. This operation
 	// blocks till this record and all records before it are written to the file
@@ -75,22 +88,26 @@ type WriteAheadLog interface {
 	// In case of restarts, if this record is not recoverable then, no following
 	// records are recovered.
 	//
+	// uid: User id for the record.
+	//
 	// record: User data written to the wal.
 	//
 	// On success, returns a wal-local, monotonically increasing unique id for
 	// the record's position.
-	AppendChangeRecord(data []byte) (LSN, error)
+	AppendChangeRecord(uid string, data []byte) (LSN, error)
 
 	// SyncChangeRecord is similar to AppendChangeRecord, but performs a
 	// fdatasync equivalent operation so that record (and all records before it)
 	// becomes durable. Users should make sure disk caches are disabled in the
 	// system.
 	//
+	// uid: User id for the record.
+	//
 	// record: User data written to the wal.
 	//
 	// On success, returns a wal-local, monotonically increasing unique id for
 	// the record's position.
-	SyncChangeRecord(data []byte) (LSN, error)
+	SyncChangeRecord(uid string, data []byte) (LSN, error)
 
 	// BeginCheckpoint starts a checkpoint operation. Only one checkpoint can be
 	// active at a time.
@@ -111,13 +128,15 @@ type WriteAheadLog interface {
 	// AppendCheckpointRecord writes a checkpoint record to the wal. If
 	// checkpoint state is huge, it can be split into multiple records.
 	//
-	// record: User data written into the checkpoint.
+	// uid: User id for the record.
+	//
+	// record: User data written into the checkpoint record.
 	//
 	// Returns an error on backend failures. A failure in logging a checkpoint
 	// record doesn't abort the checkpoint because retrying the same operation
 	// may succeed (For example, it may succeed when free disk space becomes
 	// available.)
-	AppendCheckpointRecord(data []byte) error
+	AppendCheckpointRecord(uid string, data []byte) error
 }
 
 // Recoverer interface defines necessary functions for objects that store their
@@ -136,10 +155,12 @@ type Recoverer interface {
 	// Also, this function may not be invoked if no checkpoints were taken
 	// successfully.
 	//
-	// data: Checkpoint record.
+	// uid: User id for the record.
+	//
+	// data: User data in the checkpoint record.
 	//
 	// Recovery is aborted if this callback returns a non-nil error.
-	RecoverCheckpoint(data []byte) error
+	RecoverCheckpoint(uid string, data []byte) error
 
 	// RecoverChange function is invoked for every change record logged into the
 	// wal. If there was a successful checkpoint, only change records that were
@@ -150,8 +171,10 @@ type Recoverer interface {
 	// for each change record. Since checkpoints could be aborted in the middle,
 	// LSN ids may not be in contiguous sequence.
 	//
-	// data: Change record.
+	// uid: User id for the record.
+	//
+	// data: User data in the change record.
 	//
 	// Recovery is aborted if this callback returns a non-nil error.
-	RecoverChange(lsn LSN, data []byte) error
+	RecoverChange(lsn LSN, uid string, data []byte) error
 }

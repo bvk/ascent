@@ -176,6 +176,9 @@ type WriteAheadLog struct {
 
 	// List of change files opened for writing.
 	changeFileMap map[int64]*os.File
+
+	// Mapping from user id to recoverer for records with the matching user id.
+	recovererMap map[string]wal.Recoverer
 }
 
 func (this *WriteAheadLog) Initialize(opts *Options,
@@ -207,6 +210,7 @@ func (this *WriteAheadLog) Initialize(opts *Options,
 		beginCheckpointOffset: -1,
 
 		changeFileMap: make(map[int64]*os.File),
+		recovererMap:  make(map[string]wal.Recoverer),
 	}
 	defer func() {
 		if status != nil {
@@ -247,6 +251,29 @@ func (this *WriteAheadLog) Close() (status error) {
 		this.checkpointFile = nil
 	}
 	return status
+}
+
+// ConfigureRecoverer adds a recoverer for wal records with the matching user
+// id.
+//
+// uid: User id for the record.
+//
+// recoverer: Recoverer for the records with matching user id.
+//
+// Returns nil on success.
+func (this *WriteAheadLog) ConfigureRecoverer(uid string,
+	recoverer wal.Recoverer) (status error) {
+
+	this.mutex.Lock()
+	defer this.mutex.Unlock()
+
+	if _, ok := this.recovererMap[uid]; ok {
+		this.Errorf("recoverer for uid %s already configured", uid)
+		return errs.ErrExist
+	}
+
+	this.recovererMap[uid] = recoverer
+	return nil
 }
 
 // Recover reads the current wal state from the file system and invokes the
@@ -300,7 +327,14 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 
 	if checkpointFileID >= 0 {
 		cbw := func(offset int64, header *walpb.RecordHeader, data []byte) error {
-			return recoverer.RecoverCheckpoint(data)
+			var uid string
+			if header.UserId != nil {
+				uid = *header.UserId
+				if recoverer, ok := this.recovererMap[uid]; ok {
+					return recoverer.RecoverCheckpoint(uid, data)
+				}
+			}
+			return recoverer.RecoverCheckpoint(uid, data)
 		}
 
 		filePath := fmt.Sprintf("%s/%s.checkpoint.%d", this.dir, this.name,
@@ -313,7 +347,14 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 	sort.Sort(Int64Slice(changeFileList))
 
 	cbw := func(offset int64, header *walpb.RecordHeader, data []byte) error {
-		return recoverer.RecoverChange(offset, data)
+		var uid string
+		if header.UserId != nil {
+			uid = *header.UserId
+			if recoverer, ok := this.recovererMap[uid]; ok {
+				return recoverer.RecoverChange(offset, uid, data)
+			}
+		}
+		return recoverer.RecoverChange(offset, uid, data)
 	}
 
 	lastFileID, lastEndOffset := int64(-1), int64(-1)
@@ -356,14 +397,16 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 // unique for that record. Records are written to the file system after a
 // timeout or when any synchronous record is written after this record.
 //
+// uid: User id for the record.
+//
 // data: User data.
 //
 // Returns unique LSN representing the record.
-func (this *WriteAheadLog) QueueChangeRecord(data []byte) wal.LSN {
+func (this *WriteAheadLog) QueueChangeRecord(uid string, data []byte) wal.LSN {
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
-	offset, _ := this.logChangeData(data)
+	offset, _ := this.logChangeData(uid, data)
 	return offset
 }
 
@@ -371,17 +414,19 @@ func (this *WriteAheadLog) QueueChangeRecord(data []byte) wal.LSN {
 // records before it) are written to the kernel. Note that, writing to kernel
 // doesn't ensure durability.
 //
+// uid: User id for the record.
+//
 // data: User data.
 //
 // On success, returns unique LSN representing the record. On a failure, record
 // may not be written, so users should retry as necessary.
-func (this *WriteAheadLog) AppendChangeRecord(data []byte) (lsn wal.LSN,
-	status error) {
+func (this *WriteAheadLog) AppendChangeRecord(uid string, data []byte) (
+	lsn wal.LSN, status error) {
 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
-	offset, size := this.logChangeData(data)
+	offset, size := this.logChangeData(uid, data)
 	defer func() {
 		if status != nil {
 			this.rmChangeEntry(offset, size)
@@ -400,17 +445,19 @@ func (this *WriteAheadLog) AppendChangeRecord(data []byte) (lsn wal.LSN,
 // fdatasync-ed so that data becomes durable. Note that, disk caches may
 // interfere with durability, so users should disable disk caches if any.
 //
+// uid: User id for the record.
+//
 // data: User data.
 //
 // On success, returns unique LSN representing the record. On a failure, record
 // may not be written, so users should retry as necessary.
-func (this *WriteAheadLog) SyncChangeRecord(data []byte) (lsn wal.LSN,
-	status error) {
+func (this *WriteAheadLog) SyncChangeRecord(uid string, data []byte) (
+	lsn wal.LSN, status error) {
 
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
-	offset, size := this.logChangeData(data)
+	offset, size := this.logChangeData(uid, data)
 	defer func() {
 		if status != nil {
 			this.rmChangeEntry(offset, size)
@@ -501,10 +548,12 @@ func (this *WriteAheadLog) EndCheckpoint(commit bool) (status error) {
 // checkpoint records are always written the to the kernel, so that memory
 // utilization will be low.
 //
+// uid: User id for the record.
+//
 // data: User data.
 //
 // Returns nil on success. On failure, no record is written to the checkpoint.
-func (this *WriteAheadLog) AppendCheckpointRecord(data []byte) (
+func (this *WriteAheadLog) AppendCheckpointRecord(uid string, data []byte) (
 	status error) {
 
 	this.mutex.Lock()
@@ -513,6 +562,9 @@ func (this *WriteAheadLog) AppendCheckpointRecord(data []byte) (
 	header := &walpb.RecordHeader{}
 	header.Type = walpb.RecordHeader_CHECKPOINT.Enum()
 	header.Checksum = this.checksum(data)
+	if len(uid) > 0 {
+		header.UserId = proto.String(uid)
+	}
 
 	offset, size := this.addCheckpointEntry(header, data)
 	defer func() {
@@ -871,13 +923,18 @@ func (this *WriteAheadLog) commitCheckpoint() (status error) {
 
 // logChangeData adds a new change record to the pending changes list.
 //
+// uid: User id for the record.
+//
 // data: User data.
 //
 // Returns wal-offset and number of bytes occupied by the change record.
-func (this *WriteAheadLog) logChangeData(data []byte) (int64, int) {
+func (this *WriteAheadLog) logChangeData(uid string, data []byte) (int64, int) {
 	header := &walpb.RecordHeader{}
 	header.Type = walpb.RecordHeader_CHANGE.Enum()
 	header.Checksum = this.checksum(data)
+	if len(uid) > 0 {
+		header.UserId = proto.String(uid)
+	}
 	return this.addChangeEntry(header, data)
 }
 
