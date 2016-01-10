@@ -137,7 +137,7 @@ type Messenger interface {
 
 	// CloseMessage releases a message and its resources. If message is a
 	// request, messengers stop monitoring for incoming responses.
-	CloseMessage(*thispb.Header)
+	CloseMessage(*thispb.Header) error
 
 	// Send queues a message for delivery. It will be flushed to the wire as soon
 	// as possible, but no guarantees can be assumed. Input parameters are not

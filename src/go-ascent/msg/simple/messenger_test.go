@@ -41,11 +41,12 @@ func TestLoopbackMessages(test *testing.T) {
 	logger.Infof("starting new test")
 
 	opts := &Options{
-		MaxWriteTimeout:    20 * time.Millisecond,
-		ResponseQueueSize:  1,
-		SendQueueSize:      1,
-		NegotiationTimeout: 20 * time.Millisecond,
-		SendRetryTimeout:   10 * time.Millisecond,
+		MaxWriteTimeout:     20 * time.Millisecond,
+		ResponseQueueSize:   1,
+		SendQueueSize:       1,
+		NegotiationTimeout:  20 * time.Millisecond,
+		SendRetryTimeout:    10 * time.Millisecond,
+		MaxDispatchRequests: 1,
 	}
 	if err := opts.Validate(); err != nil {
 		test.Errorf("could not validate messenger options: %v", err)
@@ -92,7 +93,7 @@ func TestLoopbackMessages(test *testing.T) {
 			test.Errorf("could not send request to self: %v", err)
 			return
 		}
-		if _, _, err := msn1.Receive(reqHeader, 0 /* timeout */); err != nil {
+		if _, _, err := msn1.Receive(reqHeader, time.Second); err != nil {
 			test.Errorf("could not receive response from self: %v", err)
 			return
 		}
@@ -112,11 +113,13 @@ func TestNetworkMessaging(test *testing.T) {
 	logger.Infof("starting new test")
 
 	opts := &Options{
-		MaxWriteTimeout:    20 * time.Millisecond,
-		ResponseQueueSize:  1,
-		SendQueueSize:      1,
-		NegotiationTimeout: 20 * time.Millisecond,
-		SendRetryTimeout:   10 * time.Millisecond,
+		MaxWriteTimeout:        20 * time.Millisecond,
+		ResponseQueueSize:      1,
+		SendQueueSize:          1,
+		NegotiationTimeout:     20 * time.Millisecond,
+		SendRetryTimeout:       10 * time.Millisecond,
+		MaxDispatchRequests:    1,
+		DispatchRequestTimeout: time.Millisecond,
 	}
 	if err := opts.Validate(); err != nil {
 		test.Errorf("could not validate messenger options: %v", err)
@@ -145,20 +148,6 @@ func TestNetworkMessaging(test *testing.T) {
 		}
 	}()
 
-	msn1Address := "default://127.0.0.1:10000"
-	if err := msn1.AddListenerAddress(msn1Address); err != nil {
-		test.Errorf("could not add listener address %s to msn1: %v", msn1Address,
-			err)
-		return
-	}
-
-	msn2Address := "default://127.0.0.1:20000"
-	if err := msn2.AddListenerAddress(msn2Address); err != nil {
-		test.Errorf("could not add listener address %s to msn2: %v", msn2Address,
-			err)
-		return
-	}
-
 	if err := msn1.Start(); err != nil {
 		test.Errorf("could not start messenger msn1: %v", err)
 		return
@@ -179,12 +168,28 @@ func TestNetworkMessaging(test *testing.T) {
 		}
 	}()
 
-	if err := msn1.AddPeerAddress("msn2", []string{msn2Address}); err != nil {
+	msn1Address := "tcp://127.0.0.1:10000"
+	if err := msn1.AddListenerAddress(msn1Address); err != nil {
+		test.Errorf("could not add listener address %s to msn1: %v", msn1Address,
+			err)
+		return
+	}
+	msn1AddressList := msn1.ListenerAddressList()
+
+	msn2Address := "tcp://127.0.0.1:20000"
+	if err := msn2.AddListenerAddress(msn2Address); err != nil {
+		test.Errorf("could not add listener address %s to msn2: %v", msn2Address,
+			err)
+		return
+	}
+	msn2AddressList := msn2.ListenerAddressList()
+
+	if err := msn1.AddPeerAddress("msn2", msn2AddressList); err != nil {
 		test.Errorf("could not add msn2 addresses to msn1: %v", err)
 		return
 	}
 
-	if err := msn2.AddPeerAddress("msn1", []string{msn1Address}); err != nil {
+	if err := msn2.AddPeerAddress("msn1", msn1AddressList); err != nil {
 		test.Errorf("could not add msn1 addresses to msn2: %v", err)
 		return
 	}

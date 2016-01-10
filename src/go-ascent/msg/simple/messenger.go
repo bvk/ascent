@@ -59,6 +59,12 @@ type Options struct {
 
 	// Retry timeout for sending pending messages.
 	SendRetryTimeout time.Duration
+
+	// Maximum number of requests to dispatch simultaneously.
+	MaxDispatchRequests int
+
+	// Time to wait to queue an incoming request.
+	DispatchRequestTimeout time.Duration
 }
 
 // Validate checks for invalid user configuration settings.
@@ -77,6 +83,10 @@ func (this *Options) Validate() (status error) {
 	}
 	if this.SendRetryTimeout < 10*time.Millisecond {
 		err := errs.NewErrInvalid("send retry timeout is too small")
+		status = errs.MergeErrors(status, err)
+	}
+	if this.MaxDispatchRequests < 1 {
+		err := errs.NewErrInvalid("at least one request should be dispatched")
 		status = errs.MergeErrors(status, err)
 	}
 	return status
@@ -122,6 +132,9 @@ type Messenger struct {
 
 	// All exported function names and their handlers map.
 	exportMap map[string]map[string]msg.Handler
+
+	// A buffered channel for dispatching incoming requests.
+	requestCh chan *Entry
 }
 
 // Peer represents the meta data for a remote messenger.
@@ -144,6 +157,9 @@ type Peer struct {
 type Transport struct {
 	// A name for the transport.
 	name string
+
+	// Atomic status flag, when set indicates this transport had errors.
+	bad int32
 
 	// Connection to the remote messenger.
 	connection net.Conn
@@ -191,6 +207,12 @@ func (this *Messenger) Initialize(opts *Options, uid string) (status error) {
 	this.requestMap = make(map[int64]chan *Entry)
 	this.Logger = this.NewLogger("simple-messenger:%s", uid)
 	this.ctlr.Initialize(this)
+
+	this.requestCh = make(chan *Entry, this.opts.MaxDispatchRequests)
+	for ii := 0; ii < this.opts.MaxDispatchRequests; ii++ {
+		this.wg.Add(1)
+		go this.goDispatch()
+	}
 	return nil
 }
 
@@ -212,7 +234,7 @@ func (this *Messenger) Close() (status error) {
 
 // Start activates the messenger by opening all its listeners.
 func (this *Messenger) Start() error {
-	token, errToken := this.ctlr.NewToken("start", nil /* timeout */)
+	token, errToken := this.ctlr.NewToken("Start", nil /* timeout */)
 	if errToken != nil {
 		return errToken
 	}
@@ -237,7 +259,7 @@ func (this *Messenger) Start() error {
 // all open transports, so no further messages can be sent or received using
 // the messenger.
 func (this *Messenger) Stop() error {
-	token, errToken := this.ctlr.NewToken("start", nil /* timeout */)
+	token, errToken := this.ctlr.NewToken("Stop", nil /* timeout */)
 	if errToken != nil {
 		return errToken
 	}
@@ -543,12 +565,16 @@ func (this *Messenger) ClosePeer(peerID string) (status error) {
 
 	close(peer.outCh)
 	for tport := range peer.transportMap {
-		if err := tport.connection.Close(); err != nil {
-			this.Errorf("could not close transport connection for %s: %v",
-				tport.name, err)
-			status = errs.MergeErrors(status, err)
+		if tport.connection != nil {
+			if err := tport.connection.Close(); err != nil {
+				this.Errorf("could not close transport connection for %s: %v",
+					tport.name, err)
+				status = errs.MergeErrors(status, err)
+			}
 		}
+		tport.connection = nil
 	}
+	peer.transportMap = make(map[*Transport]struct{})
 	return status
 }
 
@@ -632,6 +658,7 @@ func (this *Messenger) Receive(request *msgpb.Header, timeout time.Duration) (
 	// Perform a blocking receive with a timeout.
 	select {
 	case <-time.After(timeout):
+		this.Warningf("timedout waiting for response to %s", request)
 		return nil, nil, errs.ErrTimeout
 
 	case entry := <-responseCh:
@@ -658,7 +685,7 @@ func (this *Messenger) OpenTransport(peer *Peer, address string) (
 
 	network := ""
 	switch addressURL.Scheme {
-	case "default":
+	case "tcp":
 		network = "tcp4"
 
 	default:
@@ -843,8 +870,7 @@ func (this *Messenger) CloseTransport(peer *Peer, tport *Transport) (
 	this.ctlr.CloseToken(token)
 
 	if tport.connection == nil {
-		this.Errorf("transport was already closed")
-		return errs.ErrInvalid
+		return nil
 	}
 
 	if err := tport.connection.Close(); err != nil {
@@ -963,24 +989,29 @@ func (this *Messenger) DispatchIncoming(senderID string, header *msgpb.Header,
 		return this.DispatchPost(header, data)
 	}
 
-	// This is a request message, so we send an automatic response on errors.
+	// This is a request message, so add it to the request queue.
 
-	msnStatus, appStatus := this.DispatchRequest(header, data)
-	if msnStatus != nil || appStatus != nil {
-		failure := this.NewResponse(header)
-		if msnStatus != nil {
-			failure.Response.MessengerStatus = errs.MakeProtoFromError(msnStatus)
-		} else {
-			failure.Response.HandlerStatus = errs.MakeProtoFromError(appStatus)
-		}
+	entry := &Entry{header: header, data: data}
 
-		sourceID := header.GetMessengerId()
-		if err := this.Send(sourceID, failure, nil); err != nil {
-			this.Errorf("could not reply failure %s for %s from %s (ignored)",
-				failure, header, sourceID)
+	if this.opts.DispatchRequestTimeout > 0 {
+		select {
+		case this.requestCh <- entry:
+			return nil
+		case <-time.After(this.opts.DispatchRequestTimeout):
+			this.Errorf("could not dispatch request %s because request queue "+
+				"is full", header)
+			return errs.ErrOverflow
 		}
 	}
-	return nil
+
+	select {
+	case this.requestCh <- entry:
+		return nil
+	default:
+		this.Errorf("could not dispatch request %s because request queue is full",
+			header)
+		return errs.ErrOverflow
+	}
 }
 
 // DispatchPost dispatches an incoming post message to appropriate handler.
@@ -1017,7 +1048,8 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 	requestID := response.GetRequestId()
 	responseCh, found := this.requestMap[requestID]
 	if !found {
-		this.Errorf("could not find state of request %d", requestID)
+		this.Errorf("could not find request %d to dispatch response %s",
+			requestID, header)
 		return errs.ErrNotExist
 	}
 
@@ -1030,7 +1062,8 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 	case responseCh <- entry:
 		return nil
 	default:
-		this.Errorf("could not queue response to request %d", requestID)
+		this.Errorf("could not queue response %s to request %d", header,
+			requestID)
 		return errs.ErrOverflow
 	}
 }
@@ -1045,6 +1078,23 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 // Returns dispatch operation status and the handler status.
 func (this *Messenger) DispatchRequest(header *msgpb.Header,
 	data []byte) (msnStatus, appStatus error) {
+
+	defer func() {
+		if msnStatus != nil || appStatus != nil {
+			failure := this.NewResponse(header)
+			if msnStatus != nil {
+				failure.Response.MessengerStatus = errs.MakeProtoFromError(msnStatus)
+			} else {
+				failure.Response.HandlerStatus = errs.MakeProtoFromError(appStatus)
+			}
+
+			sourceID := header.GetMessengerId()
+			if err := this.Send(sourceID, failure, nil); err != nil {
+				this.Errorf("could not reply failure %s for %s from %s (ignored)",
+					failure, header, sourceID)
+			}
+		}
+	}()
 
 	token, errToken := this.ctlr.NewToken("DispatchRequest", nil, /* timeout */
 		"this.exportMap")
@@ -1097,11 +1147,17 @@ func (this *Messenger) DispatchRequest(header *msgpb.Header,
 // entryList: List of messages to write.
 //
 // Returns number of messages written into the transports.
-func (this *Messenger) FlushMessages(peer *Peer, entryList ...*Entry) (
-	int, error) {
+func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
+	cnt int, status error) {
 
-	token, errToken := this.ctlr.NewToken("FlushMessages", nil, /* timeout */
-		peer.peerID)
+	// FlushMessages must block Stop operation, so we take an extra private
+	// resource (named flush-peer) so that full lock acquired in Stop will be
+	// blocked.
+	resource := fmt.Sprintf("flush-%s", peer.peerID)
+
+	timeoutCh := time.After(this.opts.MaxWriteTimeout)
+	token, errToken := this.ctlr.NewToken("FlushMessages", timeoutCh,
+		peer.peerID, resource)
 	if errToken != nil {
 		return 0, errToken
 	}
@@ -1116,7 +1172,15 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList ...*Entry) (
 	} else {
 		transportList = make([]*Transport, 0, len(peer.transportMap))
 		for tport := range peer.transportMap {
-			transportList = append(transportList, tport)
+			if atomic.LoadInt32(&tport.bad) == 0 {
+				transportList = append(transportList, tport)
+			} else {
+				delete(peer.transportMap, tport)
+				if tport.connection != nil {
+					tport.connection.Close()
+					tport.connection = nil
+				}
+			}
 		}
 	}
 
@@ -1156,14 +1220,18 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList ...*Entry) (
 				entry.header, tport.name, errEncode)
 			return count, errEncode
 		}
+
+		deadline := time.Now().Add(this.opts.MaxWriteTimeout)
+		tport.connection.SetWriteDeadline(deadline)
 		if _, err := tport.connection.Write(packet); err != nil {
-			this.Errorf("could not write packet to %s: %v", tport.name, err)
-			if err := this.CloseTransport(peer, tport); err != nil {
-				this.Errorf("could not close bad transport %s to peer %s "+
-					"(ignored): %v", tport.name, peer.peerID, err)
+			if err != io.EOF && !this.ctlr.IsClosed() {
+				this.Errorf("could not write packet to %s: %v", tport.name, err)
 			}
+			atomic.StoreInt32(&tport.bad, 1)
 			return count, err
 		}
+		tport.connection.SetWriteDeadline(time.Time{})
+		this.Infof("=> %s to %s", entry.header, peer.peerID)
 		count++
 	}
 	return count, nil
@@ -1228,7 +1296,7 @@ func (this *Messenger) CheckPeerAddressList(peerID string,
 		}
 
 		switch addressURL.Scheme {
-		case "default", "tcp4", "tcp":
+		case "tcp4", "tcp":
 		default:
 			this.Warningf("address scheme %s (in %s) is not supported for peer %s",
 				addressURL, address, peerID)
@@ -1293,6 +1361,7 @@ func (this *Messenger) doStop() (status error) {
 					peer.peerID, err)
 				status = errs.MergeErrors(status, err)
 			}
+			tport.connection = nil
 		}
 		this.Infof("closed %d sockets to peer %s", len(peer.transportMap),
 			peer.peerID)
@@ -1310,7 +1379,7 @@ func (this *Messenger) startListener(address string) error {
 
 	network := ""
 	switch addressURL.Scheme {
-	case "default":
+	case "tcp":
 		network = "tcp4"
 
 	default:
@@ -1417,18 +1486,22 @@ func (this *Messenger) doNewPeer(peerID string, addressList []string) (
 // appropriately.
 func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 	defer this.wg.Done()
-	defer this.CloseTransport(peer, tport)
 
 	for {
 		packetSize, errPeek := tport.packer.PeekSize(tport.reader)
 		if errPeek != nil {
-			this.Errorf("could not peek next packet size from %s: %v", tport.name,
-				errPeek)
+			if errPeek != io.EOF && !this.ctlr.IsClosed() {
+				this.Errorf("could not peek next packet size from %s: %v", tport.name,
+					errPeek)
+			}
+			atomic.StoreInt32(&tport.bad, 1)
 			return
 		}
 		packet := make([]byte, packetSize)
 		if _, err := io.ReadFull(tport.reader, packet); err != nil {
-			this.Errorf("could not read next message from %s: %v", tport.name, err)
+			if errPeek != io.EOF && !this.ctlr.IsClosed() {
+				this.Errorf("could not read next message from %s: %v", tport.name, err)
+			}
 			return
 		}
 		header, data, errDecode := tport.packer.Decode(packet)
@@ -1437,6 +1510,7 @@ func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 				errDecode)
 			return
 		}
+		this.Infof("<= %s from %s", header, peer.peerID)
 		if err := this.DispatchIncoming(peer.peerID, header, data); err != nil {
 			this.Warningf("could not dispatch incoming message %s from %s "+
 				"(ignored): %v", header, tport.name, err)
@@ -1447,7 +1521,6 @@ func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 // goSend sends outgoing messages on a transport.
 func (this *Messenger) goSend(peer *Peer) {
 	defer this.wg.Done()
-	defer this.ClosePeer(peer.peerID)
 
 	var entryList []*Entry
 	timeoutCh := time.After(this.opts.SendRetryTimeout)
@@ -1460,7 +1533,7 @@ func (this *Messenger) goSend(peer *Peer) {
 
 		case <-timeoutCh:
 			if len(entryList) > 0 {
-				count, errFlush := this.FlushMessages(peer, entryList...)
+				count, errFlush := this.FlushMessages(peer, entryList)
 				if errFlush != nil {
 					this.Errorf("could not send messages to peer %s (will retry): %v",
 						peer.peerID, errFlush)
@@ -1471,12 +1544,28 @@ func (this *Messenger) goSend(peer *Peer) {
 
 		case entry := <-peer.outCh:
 			entryList = append(entryList, entry)
-			count, errFlush := this.FlushMessages(peer, entryList...)
+			count, errFlush := this.FlushMessages(peer, entryList)
 			if errFlush != nil {
 				this.Errorf("could not send messages to peer %s (will retry): %v",
 					peer.peerID, errFlush)
 			}
 			entryList = entryList[count:]
+		}
+	}
+}
+
+// goDispatch receives incoming requests from the dispatch queue and calls the
+// registered handler in a loop.
+func (this *Messenger) goDispatch() {
+	defer this.wg.Done()
+
+	closeCh := this.ctlr.GetCloseChannel()
+	for {
+		select {
+		case <-closeCh:
+			return
+		case entry := <-this.requestCh:
+			this.DispatchRequest(entry.header, entry.data)
 		}
 	}
 }
