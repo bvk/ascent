@@ -53,7 +53,11 @@ type SimpleToken struct {
 
 type SimpleController struct {
 	// Wait group to wait for live operations to complete.
-	wg sync.WaitGroup
+	sync.WaitGroup
+
+	// A mutex to implement Lock/Unlock operations.
+	mutex     sync.Mutex
+	lockToken Token
 
 	// Broadcast channel to signal closing the controller.
 	closeCh chan struct{}
@@ -80,7 +84,7 @@ func (this *SimpleController) Initialize() {
 	this.closeCh = make(chan struct{})
 	this.resourceMap = make(map[string]bool)
 
-	this.wg.Add(1)
+	this.Add(1)
 	go this.goManageTokens()
 }
 
@@ -94,7 +98,7 @@ func (this *SimpleController) Close() error {
 	default:
 		close(this.closeCh)
 	}
-	this.wg.Wait()
+	this.Wait()
 	return nil
 }
 
@@ -163,6 +167,27 @@ func (this *SimpleController) CloseToken(token Token) {
 	}
 }
 
+// Lock locks all resources. This works even after closing the controller.
+func (this *SimpleController) Lock() {
+	token, errToken := this.NewToken("lock", 0 /* timeout */)
+	if errToken == nil {
+		this.lockToken = token
+		return
+	}
+	this.mutex.Lock()
+}
+
+// Unlock unlocks previous lock. Lock locks all resources. This works even
+// after closing the controller.
+func (this *SimpleController) Unlock() {
+	if this.lockToken != nil {
+		this.CloseToken(this.lockToken)
+		this.lockToken = nil
+		return
+	}
+	this.mutex.Unlock()
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 
 // issueToken issues a token, if the receive hasn't timed out and is still
@@ -173,7 +198,7 @@ func (this *SimpleController) issueToken(token *SimpleToken) {
 		return
 
 	case token.resultCh <- nil:
-		this.wg.Add(1)
+		this.Add(1)
 		if token.resourceList == nil {
 			this.lockAll = true
 			return
@@ -221,7 +246,7 @@ func (this *SimpleController) cancelToken(token *SimpleToken, status error) {
 
 // releaseToken closes a token and releases all resources locked by that token.
 func (this *SimpleController) releaseToken(token *SimpleToken) {
-	defer this.wg.Done()
+	defer this.Done()
 
 	if token.resourceList == nil {
 		this.lockAll = false
@@ -266,7 +291,7 @@ func (this *SimpleController) cancelAllWaiting(status error) {
 
 // goManageTokens handles all token management operations.
 func (this *SimpleController) goManageTokens() {
-	defer this.wg.Done()
+	defer this.Done()
 
 	for {
 		select {

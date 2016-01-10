@@ -34,7 +34,17 @@ func TestSimpleController(test *testing.T) {
 	defer func() {
 		if err := controller.Close(); err != nil {
 			test.Errorf("could not close the controller: %v", err)
+			return
 		}
+
+		token, errToken := controller.NewToken("any", 0 /* timeout */)
+		if !errs.IsClosed(errToken) {
+			test.Errorf("controller issued token %v after it is closed", token)
+			return
+		}
+
+		controller.Lock()
+		controller.Unlock()
 	}()
 
 	// Check that SimpleController implements Controller interface.
@@ -76,4 +86,7 @@ func TestSimpleController(test *testing.T) {
 
 	controller.CloseToken(token3)
 	controller.CloseToken(token4)
+
+	controller.Lock()
+	controller.Unlock()
 }
