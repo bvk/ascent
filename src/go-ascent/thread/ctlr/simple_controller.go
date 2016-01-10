@@ -32,19 +32,26 @@
 package ctlr
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"go-ascent/base/errs"
+	"go-ascent/base/log"
 )
 
 type SimpleToken struct {
+	*SimpleController
+
 	// Name of the operation represented by this token.
 	name string
 
+	// Flag indicating if token was closed already.
+	closed bool
+
 	// List of resource names locked by this operation. A nil represents that all
 	// resources are locked.
-	resourceList []string
+	resourceMap map[string]struct{}
 
 	// Channels for coordinating with token manager go-routine.
 	resultCh chan error
@@ -52,11 +59,12 @@ type SimpleToken struct {
 }
 
 type SimpleController struct {
+	log.Logger
+
 	// Wait group to wait for live operations to complete.
 	sync.WaitGroup
 
-	// A mutex to implement Lock/Unlock operations.
-	mutex     sync.Mutex
+	// A special token to implement Lock/Unlock operations.
 	lockToken Token
 
 	// Broadcast channel to signal closing the controller.
@@ -66,6 +74,10 @@ type SimpleController struct {
 	// manager.
 	newCh  chan *SimpleToken
 	doneCh chan *SimpleToken
+
+	// Channel to send a resource early release request, without closing the
+	// corresponding token.
+	releaseCh chan string
 
 	// Flag to indicate that all resources are locked.
 	lockAll bool
@@ -83,6 +95,8 @@ func (this *SimpleController) Initialize() {
 	this.newCh = make(chan *SimpleToken)
 	this.closeCh = make(chan struct{})
 	this.resourceMap = make(map[string]bool)
+	this.releaseCh = make(chan string)
+	this.Logger = this.Logger.NewLogger("ctlr")
 
 	this.Add(1)
 	go this.goManageTokens()
@@ -100,6 +114,11 @@ func (this *SimpleController) Close() error {
 	}
 	this.Wait()
 	return nil
+}
+
+// GetCloseChannel returns the channel that broadcasts close operation.
+func (this *SimpleController) GetCloseChannel() <-chan struct{} {
+	return this.closeCh
 }
 
 // NewToken requests the controller for a new token for given timeout.
@@ -121,9 +140,11 @@ func (this *SimpleController) NewToken(opName string, timeout time.Duration,
 	// this with plain mutexes.
 
 	token := &SimpleToken{
-		name:     opName,
-		cancelCh: make(chan struct{}),
-		resultCh: make(chan error),
+		SimpleController: this,
+		name:             opName,
+		cancelCh:         make(chan struct{}),
+		resultCh:         make(chan error),
+		resourceMap:      make(map[string]struct{}),
 	}
 	defer func() {
 		if status != nil {
@@ -131,8 +152,8 @@ func (this *SimpleController) NewToken(opName string, timeout time.Duration,
 		}
 	}()
 
-	if resourceList != nil {
-		token.resourceList = append(token.resourceList, resourceList...)
+	for _, resource := range resourceList {
+		token.resourceMap[resource] = struct{}{}
 	}
 
 	var timeoutCh <-chan time.Time
@@ -157,35 +178,75 @@ func (this *SimpleController) NewToken(opName string, timeout time.Duration,
 	}
 }
 
+func (this *SimpleController) ReleaseResource(tok Token, resource string) bool {
+	token := tok.(*SimpleToken)
+	if _, ok := token.resourceMap[resource]; ok {
+		select {
+		case <-this.closeCh:
+			return false
+		case this.releaseCh <- resource:
+			delete(token.resourceMap, resource)
+			return true
+		}
+	}
+	return false
+}
+
 // CloseToken releases previously issued token.
-func (this *SimpleController) CloseToken(token Token) {
+func (this *SimpleController) CloseToken(tok Token) {
+	token := tok.(*SimpleToken)
+	// Just return if token was closed already.
+	if token.closed {
+		return
+	}
+	token.closed = true
+
 	select {
 	case <-this.closeCh:
 		return
-	case this.doneCh <- token.(*SimpleToken):
+	case this.doneCh <- token:
 		return
 	}
 }
 
 // Lock locks all resources. This works even after closing the controller.
-func (this *SimpleController) Lock() {
-	token, errToken := this.NewToken("lock", 0 /* timeout */)
-	if errToken == nil {
-		this.lockToken = token
-		return
+func (this *SimpleController) Lock(resourceList ...string) *SimpleToken {
+	token, errToken := this.NewToken("lock", 0 /* timeout */, resourceList...)
+	if errToken != nil {
+		if errs.IsClosed(errToken) {
+			// Since object was closed, lets assume all accesses are read-only.
+			resourceMap := make(map[string]struct{})
+			for _, resource := range resourceList {
+				resourceMap[resource] = struct{}{}
+			}
+			return &SimpleToken{
+				SimpleController: this,
+				resourceMap:      resourceMap,
+			}
+		}
+		panic(fmt.Sprintf("unexpected token failure: %v", errToken))
 	}
-	this.mutex.Lock()
+	return token.(*SimpleToken)
 }
 
 // Unlock unlocks previous lock. Lock locks all resources. This works even
 // after closing the controller.
-func (this *SimpleController) Unlock() {
-	if this.lockToken != nil {
-		this.CloseToken(this.lockToken)
-		this.lockToken = nil
+func (this *SimpleToken) Unlock(resourceList ...string) {
+	select {
+	case <-this.closeCh:
+		// Since object was closed, lets assume all accesses are read-only.
 		return
+	default:
+		for _, resource := range resourceList {
+			if !this.ReleaseResource(this, resource) {
+				panic(fmt.Sprintf("resource %s was not locked", resource))
+			}
+		}
+
+		if resourceList == nil || len(this.resourceMap) == 0 {
+			this.CloseToken(this)
+		}
 	}
-	this.mutex.Unlock()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -199,12 +260,12 @@ func (this *SimpleController) issueToken(token *SimpleToken) {
 
 	case token.resultCh <- nil:
 		this.Add(1)
-		if token.resourceList == nil {
+		if len(token.resourceMap) == 0 {
 			this.lockAll = true
 			return
 		}
 
-		for _, resource := range token.resourceList {
+		for resource := range token.resourceMap {
 			this.resourceMap[resource] = true
 		}
 	}
@@ -213,7 +274,7 @@ func (this *SimpleController) issueToken(token *SimpleToken) {
 // isReady returns true if all resources necessary for a token are available.
 func (this *SimpleController) isReady(token *SimpleToken) bool {
 	// Lock all token.
-	if token.resourceList == nil {
+	if len(token.resourceMap) == 0 {
 		if this.lockAll == true {
 			return false
 		}
@@ -226,7 +287,7 @@ func (this *SimpleController) isReady(token *SimpleToken) bool {
 		return true
 	}
 	// Normal token.
-	for _, resource := range token.resourceList {
+	for resource := range token.resourceMap {
 		if inuse, ok := this.resourceMap[resource]; ok && inuse {
 			return false
 		}
@@ -248,12 +309,12 @@ func (this *SimpleController) cancelToken(token *SimpleToken, status error) {
 func (this *SimpleController) releaseToken(token *SimpleToken) {
 	defer this.Done()
 
-	if token.resourceList == nil {
+	if len(token.resourceMap) == 0 {
 		this.lockAll = false
 		return
 	}
 
-	for _, resource := range token.resourceList {
+	for resource := range token.resourceMap {
 		this.resourceMap[resource] = false
 	}
 }
@@ -310,6 +371,12 @@ func (this *SimpleController) goManageTokens() {
 			this.releaseToken(token)
 			for token := this.nextReady(); token != nil; token = this.nextReady() {
 				this.issueToken(token)
+			}
+
+		case resource := <-this.releaseCh:
+			this.resourceMap[resource] = false
+			if ready := this.nextReady(); ready != nil {
+				this.issueToken(ready)
 			}
 		}
 	}

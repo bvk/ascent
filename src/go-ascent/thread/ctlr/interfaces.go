@@ -50,6 +50,7 @@ type Controller interface {
 	NewToken(opName string, timeout time.Duration, resourceList ...string) (
 		Token, error)
 
-	// CloseToken releases a token issued previously.
+	// CloseToken releases a token issued previously. A closed-token can be
+	// closed again -- which translates to a no-op.
 	CloseToken(token Token)
 }

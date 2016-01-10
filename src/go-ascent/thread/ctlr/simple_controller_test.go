@@ -26,10 +26,20 @@ import (
 	"time"
 
 	"go-ascent/base/errs"
+	"go-ascent/base/log"
 )
 
 func TestSimpleController(test *testing.T) {
-	controller := SimpleController{}
+	filePath := "/tmp/test_simple_controller.log"
+	simpleLog := log.SimpleFileLog{}
+	if err := simpleLog.Initialize(filePath); err != nil {
+		test.Fatalf("could not initialize log backend: %v", err)
+		return
+	}
+	logger := simpleLog.NewLogger("test-simple-controller")
+	logger.Infof("starting new controller test")
+
+	controller := SimpleController{Logger: logger}
 	controller.Initialize()
 	defer func() {
 		if err := controller.Close(); err != nil {
@@ -43,8 +53,9 @@ func TestSimpleController(test *testing.T) {
 			return
 		}
 
-		controller.Lock()
-		controller.Unlock()
+		// Lock and Unlock work even after a Close. Safety is not expected.
+		foobar := controller.Lock("foo", "bar")
+		foobar.Unlock()
 	}()
 
 	// Check that SimpleController implements Controller interface.
@@ -87,6 +98,14 @@ func TestSimpleController(test *testing.T) {
 	controller.CloseToken(token3)
 	controller.CloseToken(token4)
 
-	controller.Lock()
-	controller.Unlock()
+	foo := controller.Lock("foo")
+	bar := controller.Lock("bar")
+	bar.Unlock("bar")
+	foo.Unlock("foo")
+
+	all := controller.Lock()
+	all.Unlock()
+
+	baz := controller.Lock("baz")
+	baz.Unlock()
 }
