@@ -43,15 +43,19 @@ func main() {
 	var remoteRef string
 	var remoteSha string
 
-	// Scan the input parameters passed to the pre-push script.
+	// Scan the input parameters passed to the pre-push script. Stdin would be
+	// empty if there are no commits to send.
 	count, errScan := fmt.Scanf("%s %s %s %s", &localRef, &localSha, &remoteRef,
 		&remoteSha)
+	if count == 0 {
+		return
+	}
 	if errScan != nil || count != 4 {
 		log.Fatalf("git input parameters are in unexpected format")
 	}
 
-	// Multiple commits can be sent in one push, so figure out the
-	// uncommited commits.
+	// Multiple commits can be sent in one push, so figure out the uncommited
+	// commits.
 	shalistCmd := exec.Command("git", "log", `--format=%H`,
 		fmt.Sprintf("%s..%s", remoteSha, localSha))
 	stdout, errShalist := shalistCmd.Output()
@@ -87,8 +91,8 @@ func main() {
 	}
 }
 
-// CheckCommitMessage verifies that commit message format includes the
-// commit message template fields.
+// CheckCommitMessage verifies that commit message format includes the commit
+// message template fields.
 //
 // See git commit template file templates/git-commit-template.txt
 func CheckCommitMessage(sha, commit string) []error {
