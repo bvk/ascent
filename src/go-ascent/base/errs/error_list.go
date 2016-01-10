@@ -16,8 +16,8 @@
 // along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
 
 //
-// This file defines SimpleError and SimpleErrorList types which implement
-// helper functions for managing errors.
+// This file defines ErrorList type which is used to collect multiple errors
+// into one error object.
 //
 
 package errs
@@ -26,39 +26,43 @@ import (
 	"fmt"
 )
 
-// SimpleError type implements serializable errors.
-type SimpleError struct {
-	Category string
-	Message  *string
+type ErrorList struct {
+	errList []error
+}
+
+func NewErrorList(first error, rest ...error) *ErrorList {
+	if first == nil {
+		switch len(rest) {
+		case 0:
+			return nil
+		case 1:
+			first, rest = rest[0], nil
+		default:
+			first, rest = rest[0], rest[1:]
+		}
+	}
+
+	if xx, ok := first.(*ErrorList); ok {
+		xx.errList = append(xx.errList, rest...)
+		return xx
+	}
+
+	var errList []error
+	errList = append(errList, first)
+	if rest != nil {
+		errList = append(errList, rest...)
+	}
+	return &ErrorList{errList}
+}
+
+// FirstError returns the first error list of errors.
+func (this *ErrorList) FirstError() error {
+	return this.errList[0]
 }
 
 // Error implements the Go language's standard error interface.
-func (this *SimpleError) Error() string {
-	if this.Message == nil {
-		return this.Category
-	}
-	return fmt.Sprintf("%s{%s}", this.Category, *this.Message)
-}
-
-func (this *SimpleError) newErrorf(format string,
-	args ...interface{}) *SimpleError {
-
-	message := fmt.Sprintf(format, args...)
-	newErr := &SimpleError{
-		Category: this.Category,
-		Message:  &message,
-	}
-	return newErr
-}
-
-func (this *SimpleError) isSimilar(err error) bool {
-	if xx, ok := err.(*ErrorList); ok {
-		err = xx.FirstError()
-	}
-	if xx, ok := err.(*SimpleError); ok {
-		return xx.Category == this.Category
-	}
-	return false
+func (this *ErrorList) Error() string {
+	return fmt.Sprint(this.errList)
 }
 
 // TODO: Add encoder and decoder functionality.

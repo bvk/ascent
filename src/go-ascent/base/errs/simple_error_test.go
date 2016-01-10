@@ -52,4 +52,13 @@ func TestSimpleError(t *testing.T) {
 	if err1.Error() != "ErrInvalid{int 10 rune x string message}" {
 		t.Errorf("custom error message for [%v] is in expected format", err1)
 	}
+
+	//
+	// MergeErrors test
+	//
+
+	aa := MergeErrors(ErrInvalid, ErrExist, ErrNotExist)
+	if !IsInvalid(aa) {
+		t.Errorf("MergeErrors(ErrInvalid, ...) doesn't satisfy IsInvalid")
+	}
 }
