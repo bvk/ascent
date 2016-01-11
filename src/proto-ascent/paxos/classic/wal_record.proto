@@ -19,8 +19,6 @@
 // This file defines wal record format for paxos/classic package.
 //
 
-import "proto-ascent/paxos/classic/rpc.proto";
-
 package ascent.paxos.classic;
 option go_package = "classic";
 
@@ -29,55 +27,71 @@ message WALRecord {
 
   optional Configuration config_change = 2;
 
-  optional Phase1Change phase1_change = 3;
-  optional Phase2Change phase2_change = 4;
-  optional BallotChange ballot_change = 5;
-  optional LearnerChange learner_change = 6;
+  optional ProposerChange proposer_change = 3;
+  optional LearnerChange learner_change = 4;
+  optional AcceptorChange acceptor_change = 5;
 }
 
 message Checkpoint {
   required Configuration configuration = 1;
-
-  // Proposer state.
-  optional int64 proposal_ballot = 2;
-
-  // Acceptor state.
-  optional int64 promised_ballot = 3;
-  optional int64 voted_ballot = 4;
-  optional bytes voted_value = 5;
-
-  // Learner state.
-  optional bytes chosen_value = 6;
+  optional ProposerState proposer_state = 2;
+  optional AcceptorState acceptor_state = 3;
+  optional LearnerState learner_state = 4;
 }
 
 message Configuration {
-  required string instance_id = 1;
+  repeated string proposer_list = 1;
+  repeated string acceptor_list = 2;
+  repeated string learner_list = 3;
+  required int32 majority_size = 4;
 
-  repeated string learner_list = 2;
-  repeated string acceptor_list = 3;
-  repeated string proposer_list = 4;
-  optional int32 majority_size = 5;
+  optional bool is_learner = 5;
+  optional bool is_acceptor = 6;
+  optional bool is_proposer = 7;
 
-  optional bool is_learner = 6;
-  optional bool is_acceptor = 7;
-  optional bool is_proposer = 8;
-  optional int32 proposer_index = 9;
+  optional int32 proposer_index = 8;
 }
 
-message Phase1Change {
-  required int64 promised_ballot = 1;
-}
-
-message Phase2Change {
-  required int64 voted_ballot = 1;
-  required bytes voted_value = 2;
-}
-
-message BallotChange {
+message ProposerState {
   required int64 proposal_ballot = 1;
 }
 
+message AcceptorState {
+  required int64 promised_ballot = 1;
+
+  required int64 voted_ballot = 2;
+  required bytes voted_value = 3;
+
+  repeated int64 acked_ballot_list = 4;
+  repeated string acked_learner_list = 5;
+}
+
+message LearnerState {
+  optional bytes chosen_value = 1;
+
+  repeated int64 voted_ballot_list = 2;
+  repeated bytes voted_value_list = 3;
+  repeated string voted_acceptor_list = 4;
+}
+
+message ProposerChange {
+  optional int64 proposal_ballot = 1;
+}
+
+message AcceptorChange {
+  optional int64 promised_ballot = 1;
+
+  optional int64 voted_ballot = 2;
+  optional bytes voted_value = 3;
+
+  optional int64 acked_ballot = 4;
+  optional string acked_learner = 5;
+}
+
 message LearnerChange {
-  optional bytes ChosenValue = 1;
-  repeated BallotStatus ballot_status_list = 2;
+  optional bytes chosen_value = 1;
+
+  optional int64 voted_ballot = 2;
+  optional bytes voted_value = 3;
+  optional string voted_acceptor = 4;
 }

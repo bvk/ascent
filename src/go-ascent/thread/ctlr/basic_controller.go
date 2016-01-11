@@ -143,6 +143,12 @@ func (this *BasicController) GetCloseChannel() <-chan struct{} {
 func (this *BasicController) NewToken(name string, timeoutCh <-chan time.Time,
 	resourceList ...string) (basicToken *BasicToken, status error) {
 
+	// start := time.Now()
+	// defer func() {
+	// 	this.Infof("acquiring token for %s took %v time", name,
+	//    time.Since(start))
+	// }()
+
 	this.mutex.Lock()
 	if this.IsClosed() {
 		this.mutex.Unlock()

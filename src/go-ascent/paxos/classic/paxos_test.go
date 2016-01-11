@@ -66,8 +66,8 @@ func TestClassicPaxosConsensus(test *testing.T) {
 
 	msnOpts := &simple.Options{
 		MaxWriteTimeout:        20 * time.Millisecond,
-		ResponseQueueSize:      10,
-		SendQueueSize:          10,
+		ResponseQueueSize:      1024,
+		SendQueueSize:          1024,
 		NegotiationTimeout:     20 * time.Millisecond,
 		SendRetryTimeout:       10 * time.Millisecond,
 		MaxDispatchRequests:    10,
@@ -84,6 +84,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		Phase1Timeout:           10 * time.Millisecond,
 		NumExtraPhase1Acceptors: 1,
 		Phase2Timeout:           10 * time.Millisecond,
+		LearnTimeout:            10 * time.Millisecond,
 	}
 
 	type Agent struct {
@@ -183,10 +184,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 	configureAgents(agent2, agents, agents, agents)
 	configureAgents(agent3, agents, agents, agents)
 
-	doneCh := make(chan struct{})
-	propose := func(client *Agent, proposer *Agent, value string) {
-		defer func() { doneCh <- struct{}{} }()
-
+	propose := func(client *Agent, value string) {
 		start := time.Now()
 		chosen, errProp := client.paxos.Propose([]byte(value), time.Second)
 		if errProp != nil {
@@ -198,13 +196,9 @@ func TestClassicPaxosConsensus(test *testing.T) {
 			time.Since(start), chosen, client.name)
 		client.chosen = chosen
 	}
-	go propose(agent1, agent2, "agent1")
-	go propose(agent2, agent3, "agent2")
-	go propose(agent3, agent1, "agent3")
-
-	<-doneCh
-	<-doneCh
-	<-doneCh
+	propose(agent1, "agent1")
+	propose(agent2, "agent2")
+	propose(agent3, "agent3")
 
 	if bytes.Compare(agent1.chosen, agent2.chosen) != 0 ||
 		bytes.Compare(agent2.chosen, agent3.chosen) != 0 ||

@@ -143,11 +143,11 @@ func (this *SimpleFileLog) logMessage(stderr, die bool, msgType rune,
 	if stderr {
 		switch msgType {
 		case FATAL:
-			fmt.Fprintf(os.Stderr, "fatal: %s", userMessage)
+			fmt.Fprintf(os.Stderr, "fatal:%s: %s", prefix, userMessage)
 		case ERROR:
-			fmt.Fprintf(os.Stderr, "error: %s", userMessage)
+			fmt.Fprintf(os.Stderr, "error:%s: %s", prefix, userMessage)
 		case WARNING:
-			fmt.Fprintf(os.Stderr, "warning: %s", userMessage)
+			fmt.Fprintf(os.Stderr, "warning:%s: %s", prefix, userMessage)
 		default:
 			os.Stderr.Write(userMessage)
 		}

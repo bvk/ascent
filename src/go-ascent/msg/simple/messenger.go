@@ -662,6 +662,9 @@ func (this *Messenger) Receive(request *msgpb.Header, timeout time.Duration) (
 		return nil, nil, errs.ErrTimeout
 
 	case entry := <-responseCh:
+		if entry == nil {
+			return nil, nil, errs.ErrRetry
+		}
 		return entry.header, entry.data, nil
 	}
 }

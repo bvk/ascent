@@ -35,7 +35,8 @@ message PaxosMessage {
   optional Phase2Request phase2_request = 7;
   optional Phase2Response phase2_response = 8;
 
-  optional LearnNotification learn_notification = 9;
+  optional LearnRequest learn_request = 9;
+  optional LearnResponse learn_response = 10;
 }
 
 message StatusRequest {
@@ -80,13 +81,10 @@ message Phase2Response {
   optional bytes voted_value = 3;
 }
 
-message LearnNotification {
-  optional bytes chosen_value = 1;
-  repeated BallotStatus ballot_status_list = 2;
+message LearnRequest {
+  required int64 voted_ballot = 1;
+  required bytes voted_value = 2;
 }
 
-message BallotStatus {
-  required int64 ballot_number = 1;
-  required bytes voted_value = 2;
-  repeated string acceptor_list = 3;
+message LearnResponse {
 }
