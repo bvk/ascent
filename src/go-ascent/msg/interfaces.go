@@ -77,6 +77,8 @@ import (
 	"bufio"
 	"time"
 
+	"go-ascent/base/log"
+
 	thispb "proto-ascent/msg"
 )
 
@@ -111,6 +113,8 @@ type Packer interface {
 
 // Messenger defines functions and semantics for all messenger implementations.
 type Messenger interface {
+	log.Logger
+
 	// UID returns a globally unique, non-empty, id for the messenger instance.
 	UID() string
 

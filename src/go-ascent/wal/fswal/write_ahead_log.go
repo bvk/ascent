@@ -85,6 +85,7 @@ import (
 	"go-ascent/wal"
 
 	walpb "proto-ascent/wal"
+	"sync/atomic"
 )
 
 // Options defines user configurable options for local wal.
@@ -179,6 +180,9 @@ type WriteAheadLog struct {
 
 	// Mapping from user id to recoverer for records with the matching user id.
 	recovererMap map[string]wal.Recoverer
+
+	// Atomic variable to indicate if wal is currently recovering.
+	recovering int32
 }
 
 func (this *WriteAheadLog) Initialize(opts *Options,
@@ -255,6 +259,11 @@ func (this *WriteAheadLog) Close() (status error) {
 	return status
 }
 
+// IsRecovering returns true if wal is under recovery.
+func (this *WriteAheadLog) IsRecovering() bool {
+	return atomic.LoadInt32(&this.recovering) != 0
+}
+
 // ConfigureRecoverer adds a recoverer for wal records with the matching user
 // id.
 //
@@ -286,6 +295,9 @@ func (this *WriteAheadLog) ConfigureRecoverer(uid string,
 //
 // Returns nil on success.
 func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
+	atomic.StoreInt32(&this.recovering, 1)
+	defer atomic.StoreInt32(&this.recovering, 0)
+
 	dir, errOpen := os.Open(this.dir)
 	if errOpen != nil {
 		this.Errorf("could not open directory %s: %v", this.dir, errOpen)

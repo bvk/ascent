@@ -102,4 +102,8 @@ message Header {
 	optional ascent.base.errs.Error handler_status = 3;
   }
   optional Response response = 5;
+
+  // Transport time.
+  optional int64 sender_timestamp_nsecs = 6;
+  optional int64 receiver_timestamp_nsecs = 7;
 }

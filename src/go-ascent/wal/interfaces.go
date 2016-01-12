@@ -26,6 +26,10 @@
 
 package wal
 
+import (
+	"go-ascent/base/log"
+)
+
 // Logical Sequence Number for wal records to uniquely identify a record
 // position in the wal.
 type LSN interface {
@@ -35,6 +39,8 @@ type LSN interface {
 // Interface designed to support replicated logs, transactional logs and
 // replicated transactional logs.
 type WriteAheadLog interface {
+	log.Logger
+
 	// ConfigureRecoverer registers a separate recoverer for all records with the
 	// matching user id.  There can only be one recoverer for an uid.
 	//
@@ -57,6 +63,9 @@ type WriteAheadLog interface {
 	// Returns an error if wal data couldn't be read or the error returned by
 	// recoverer during recovery if any.
 	Recover(recoverer Recoverer) error
+
+	// IsRecovering returns true if wal is recovering using Recover.
+	IsRecovering() bool
 
 	// QueueChangeRecord queues a record into the wal atomically. Record will be
 	// written to the wal later, so this operation doesn't block.

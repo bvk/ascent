@@ -1214,6 +1214,7 @@ func (this *Messenger) FlushMessages(peer *Peer, entryList []*Entry) (
 	for index, entry := range entryList {
 		tport := transportList[index%numTports]
 
+		entry.header.SenderTimestampNsecs = proto.Int64(time.Now().UnixNano())
 		packet, errEncode := tport.packer.Encode(entry.header, entry.data)
 		if errEncode != nil {
 			this.Warningf("could not encode packet %s to send on %s (ignored): %v",
@@ -1510,6 +1511,7 @@ func (this *Messenger) goReceive(peer *Peer, tport *Transport) {
 				errDecode)
 			return
 		}
+		header.ReceiverTimestampNsecs = proto.Int64(time.Now().UnixNano())
 		this.Infof("<= %s from %s", header, peer.peerID)
 		if err := this.DispatchIncoming(peer.peerID, header, data); err != nil {
 			this.Warningf("could not dispatch incoming message %s from %s "+
