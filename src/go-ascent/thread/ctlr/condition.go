@@ -68,6 +68,16 @@ func (this *Condition) Close() error {
 	return nil
 }
 
+// IsClosed returns true if condition variable is closed.
+func (this *Condition) IsClosed() bool {
+	select {
+	case <-this.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // WaitTimeout blocks the caller for specified time for a signal. Caller is
 // required to hold the lock before calling this function.
 //

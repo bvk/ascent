@@ -66,6 +66,9 @@ func (this *SimpleError) newErrorf(format string,
 }
 
 func (this *SimpleError) isSimilar(err error) bool {
+	if err == nil {
+		return false
+	}
 	if xx, ok := err.(*ErrorList); ok {
 		err = xx.FirstError()
 	}
