@@ -48,13 +48,17 @@ type Alarm struct {
 	// Sorted list of timestamps where jobs are pending.
 	timestampList []time.Time
 
-	// Mapping of timestamps to the list of jobs to run at that time.
-	jobsMap map[time.Time][]func()
+	// Mapping of timestamps to the list of job ids to run at that time.
+	pendingMap map[time.Time][]string
+
+	// Mapping from job id to the alarm handler function.
+	jobMap map[string]func() error
 }
 
 // Initialize initializes the alarm object.
 func (this *Alarm) Initialize() {
-	this.jobsMap = make(map[time.Time][]func())
+	this.pendingMap = make(map[time.Time][]string)
+	this.jobMap = make(map[string]func() error)
 	this.cond.Initialize(&this.mutex)
 	this.wg.Add(1)
 	go this.goSchedule()
@@ -70,7 +74,17 @@ func (this *Alarm) Close() error {
 }
 
 // ScheduleAt adds a new function to run at the specified time.
-func (this *Alarm) ScheduleAt(time time.Time, fn func()) error {
+//
+// uid: An unique id for the alarm.
+//
+// time: The timestamp when alarm handler should be invoked.
+//
+// fn: The alarm handler function.
+//
+// Returns nil if there is a pending alarm already with the same uid.
+func (this *Alarm) ScheduleAt(uid string, time time.Time,
+	fn func() error) error {
+
 	this.mutex.Lock()
 	defer this.mutex.Unlock()
 
@@ -78,8 +92,13 @@ func (this *Alarm) ScheduleAt(time time.Time, fn func()) error {
 		return errs.ErrClosed
 	}
 
-	jobList, found := this.jobsMap[time]
-	this.jobsMap[time] = append(jobList, fn)
+	if _, ok := this.jobMap[uid]; ok {
+		return errs.ErrExist
+	}
+
+	this.jobMap[uid] = fn
+	pendingList, found := this.pendingMap[time]
+	this.pendingMap[time] = append(pendingList, uid)
 	if !found {
 		this.timestampList = append(this.timestampList, time)
 		if len(this.timestampList) > 1 {
@@ -108,14 +127,20 @@ func (this *Alarm) goSchedule() {
 		now := time.Now()
 		timestamp := this.timestampList[0]
 		if now.After(timestamp) {
-			jobList := this.jobsMap[timestamp]
+			pendingList := this.pendingMap[timestamp]
 
-			delete(this.jobsMap, timestamp)
+			delete(this.pendingMap, timestamp)
 			numTimestamps := len(this.timestampList)
 			for ii := 1; ii < numTimestamps; ii++ {
 				this.timestampList[ii-1] = this.timestampList[ii]
 			}
 			this.timestampList = this.timestampList[:numTimestamps-1]
+
+			jobList := make([]func() error, len(pendingList))
+			for ii, uid := range pendingList {
+				jobList[ii] = this.jobMap[uid]
+				delete(this.jobMap, uid)
+			}
 
 			this.mutex.Unlock()
 			for _, fn := range jobList {

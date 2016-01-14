@@ -82,9 +82,10 @@ message Phase2Response {
 }
 
 message LearnRequest {
-  required int64 voted_ballot = 1;
-  required bytes voted_value = 2;
+  repeated int64 voted_ballot_list = 1;
+  repeated bytes voted_value_list = 2;
 }
 
 message LearnResponse {
+  optional bool knows_chosen_value = 1;
 }

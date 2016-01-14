@@ -88,6 +88,7 @@ func TestAlgoElection(test *testing.T) {
 			ProposeRetryInterval:    time.Millisecond,
 			NumExtraPhase1Acceptors: 1,
 			LearnTimeout:            time.Second,
+			LearnRetryInterval:      time.Millisecond,
 		},
 	}
 	if err := electionOpts.Validate(); err != nil {

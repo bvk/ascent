@@ -84,14 +84,15 @@ message AcceptorChange {
   optional int64 voted_ballot = 2;
   optional bytes voted_value = 3;
 
-  optional int64 acked_ballot = 4;
-  optional string acked_learner = 5;
+  optional string acked_learner = 4;
+  optional bool acked_chosen_value = 5;
+  repeated int64 acked_ballot_list = 6;
 }
 
 message LearnerChange {
   optional bytes chosen_value = 1;
 
-  optional int64 voted_ballot = 2;
-  optional bytes voted_value = 3;
-  optional string voted_acceptor = 4;
+  optional string voted_acceptor = 2;
+  repeated int64 voted_ballot_list = 3;
+  repeated bytes voted_value_list = 4;
 }

@@ -28,25 +28,26 @@ func TestAlarm(test *testing.T) {
 	defer alarm.Close()
 
 	doneCh := make(chan bool)
-	fun := func() {
+	fun := func() error {
 		test.Logf("alarm invoked at %v", time.Now())
 		doneCh <- true
+		return nil
 	}
 
 	now := time.Now()
-	test.Logf("installing alarms at %v to run after a second", now)
+	test.Logf("installing 2 alarms at %v to run after a second", now)
 	timestamp := now.Add(time.Second)
-	alarm.ScheduleAt(timestamp, fun)
-	alarm.ScheduleAt(timestamp, fun)
+	alarm.ScheduleAt("a", timestamp, fun)
+	alarm.ScheduleAt("b", timestamp, fun)
 
-	test.Logf("installing alarms at %v to run after two seconds", now)
+	test.Logf("installing 2 alarms at %v to run after two seconds", now)
 	timestamp = now.Add(2 * time.Second)
-	alarm.ScheduleAt(timestamp, fun)
-	alarm.ScheduleAt(timestamp, fun)
+	alarm.ScheduleAt("c", timestamp, fun)
+	alarm.ScheduleAt("d", timestamp, fun)
 
 	test.Logf("installing an alarm at %v to never run cause alarm will "+
 		"be closed", now)
-	alarm.ScheduleAt(now.Add(time.Minute), fun)
+	alarm.ScheduleAt("e", now.Add(time.Minute), fun)
 
 	<-doneCh
 	<-doneCh

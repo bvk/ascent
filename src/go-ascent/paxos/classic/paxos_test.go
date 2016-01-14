@@ -82,6 +82,7 @@ func TestClassicPaxosConsensus(test *testing.T) {
 		ProposeRetryInterval:    time.Millisecond,
 		NumExtraPhase1Acceptors: 1,
 		LearnTimeout:            10 * time.Millisecond,
+		LearnRetryInterval:      time.Millisecond,
 	}
 
 	type Agent struct {

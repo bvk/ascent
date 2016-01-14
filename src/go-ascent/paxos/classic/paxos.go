@@ -55,6 +55,9 @@ type Options struct {
 
 	// Time to wait for a learner to acknowledge a phase2 vote by the acceptor.
 	LearnTimeout time.Duration
+
+	// Time to wait before retrying learner notifications.
+	LearnRetryInterval time.Duration
 }
 
 // Validate checks if user configuration items are all valid.
@@ -70,6 +73,10 @@ func (this *Options) Validate() (status error) {
 	}
 	if this.LearnTimeout < time.Millisecond {
 		err := errs.NewErrInvalid("learn timeout must be at least a millisecond")
+		status = errs.MergeErrors(status, err)
+	}
+	if this.LearnRetryInterval < time.Millisecond {
+		err := errs.NewErrInvalid("learn notfication retry interval is too small")
 		status = errs.MergeErrors(status, err)
 	}
 	return status
@@ -90,6 +97,9 @@ type Paxos struct {
 
 	// Controller for synchronization.
 	ctlr ctlr.BasicController
+
+	// An alarm handler to notify learners.
+	alarm ctlr.Alarm
 
 	//
 	// Paxos Configuration.
@@ -127,8 +137,10 @@ type Paxos struct {
 	promisedBallot int64
 	votedBallot    int64
 	votedValue     []byte
+	votedValueMap  map[int64][]byte
 
-	learnerAckMap map[int64]map[string]struct{}
+	doneLearnerSet map[string]struct{}
+	learnerAckMap  map[int64]map[string]struct{}
 
 	//
 	// Proposer state.
@@ -190,12 +202,15 @@ func (this *Paxos) Initialize(opts *Options, namespace, uid string,
 	this.votedBallot = -1
 	this.majoritySize = -1
 	this.proposalBallot = -1
+	this.doneLearnerSet = make(map[string]struct{})
+	this.votedValueMap = make(map[int64][]byte)
 	this.ballotValueMap = make(map[int64][]byte)
 	this.ballotAcceptorsMap = make(map[int64]map[string]struct{})
 	this.learnerAckMap = make(map[int64]map[string]struct{})
 
 	this.Logger = this.NewLogger("classic-paxos:%s-%s", this.msn.UID(), uid)
 	this.ctlr.Initialize(this)
+	this.alarm.Initialize()
 	return nil
 }
 
@@ -205,12 +220,16 @@ func (this *Paxos) Close() (status error) {
 		return err
 	}
 
+	if err := this.alarm.Close(); err != nil {
+		this.Errorf("could not close alarm handler: %v", err)
+		status = errs.MergeErrors(status, err)
+	}
+
 	re := regexp.MustCompile(this.uid)
 	if err := this.wal.ConfigureRecoverer(re, nil); err != nil {
 		this.Errorf("could not unconfigure wal recoverer: %v", err)
 		status = errs.MergeErrors(status, err)
 	}
-
 	return status
 }
 
@@ -299,7 +318,6 @@ func (this *Paxos) Configure(proposerList, acceptorList,
 		config.IsProposer = proto.Bool(true)
 		config.ProposerIndex = proto.Int32(int32(proposerIndex))
 	}
-
 	return this.doUpdateConfig(&config)
 }
 
@@ -352,6 +370,13 @@ func (this *Paxos) RecoverCheckpoint(uid string, data []byte) error {
 
 // RecoverChange recovers an update from a change record.
 func (this *Paxos) RecoverChange(lsn wal.LSN, uid string, data []byte) error {
+	if lsn == nil {
+		// We reached end of wal recovery, figure out the current state and resume
+		// any inflight operations.
+		_ = this.Refresh()
+		return nil
+	}
+
 	if uid != this.uid {
 		this.Errorf("change record doesn't belong to this instance")
 		return errs.ErrInvalid
@@ -388,7 +413,7 @@ func (this *Paxos) TakeCheckpoint() error {
 	lock := this.ctlr.ReadLockAll()
 	defer lock.Unlock()
 
-	if this.MajoritySize() < 0 {
+	if !this.IsConfigured() {
 		this.Errorf("classic paxos instance is not yet configured")
 		return errs.ErrInvalid
 	}
@@ -429,13 +454,26 @@ func (this *Paxos) TakeCheckpoint() error {
 
 // Refresh inspects paxos object state and takes recovery actions as necessary.
 func (this *Paxos) Refresh() error {
-	if this.IsAcceptor() {
-		// TODO: Notify learners about your latest vote.
+	if !this.IsConfigured() {
+		return nil
 	}
-	if this.IsLearner() {
-		// TODO: Query majority acceptors to determine chosen value.
+
+	if this.IsAcceptor() {
+		if len(this.doneLearnerSet) < len(this.learnerList) {
+			now := time.Now()
+			errSched := this.alarm.ScheduleAt(this.uid, now, this.NotifyAllLearners)
+			if errSched != nil {
+				this.Errorf("could not schedule learner notifications: %v", errSched)
+				return errSched
+			}
+		}
 	}
 	return nil
+}
+
+// IsConfigured returns true if paxos object is configured.
+func (this *Paxos) IsConfigured() bool {
+	return this.MajoritySize() > 0
 }
 
 // IsLearner returns true if this paxos instance is a learner.
@@ -666,8 +704,7 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 		return errs.ErrInvalid
 	}
 
-	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header),
-		"acceptor")
+	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header), "acceptor")
 	if errLock != nil {
 		return errLock
 	}
@@ -719,10 +756,9 @@ func (this *Paxos) Phase2RPC(header *msgpb.Header,
 	if err := respond(); err != nil {
 		return err
 	}
-	lock.Unlock()
 
-	// Send a notification to all learners.
-	_ = this.NotifyAllLearners(ballot, value, this.opts.LearnTimeout)
+	// Schedule a notification to all learners.
+	_ = this.alarm.ScheduleAt(this.uid, time.Now(), this.NotifyAllLearners)
 	return nil
 }
 
@@ -735,25 +771,28 @@ func (this *Paxos) LearnRPC(header *msgpb.Header,
 		return errs.ErrInvalid
 	}
 
-	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header),
-		"learner")
+	lock, errLock := this.ctlr.TimedLock(msg.RequestTimeout(header), "learner")
 	if errLock != nil {
 		return errLock
 	}
 	defer lock.Unlock()
 
 	acceptor := header.GetMessengerId()
-
-	change := thispb.LearnerChange{}
-	change.VotedBallot = request.VotedBallot
-	change.VotedValue = request.VotedValue
-	change.VotedAcceptor = proto.String(acceptor)
-	if err := this.doUpdateLearner(&change); err != nil {
-		this.Errorf("could not update learner state: %v", err)
-		return err
+	if this.chosenValue == nil {
+		change := thispb.LearnerChange{}
+		change.VotedBallotList = request.VotedBallotList
+		change.VotedValueList = request.VotedValueList
+		change.VotedAcceptor = proto.String(acceptor)
+		if err := this.doUpdateLearner(&change); err != nil {
+			this.Errorf("could not update learner state: %v", err)
+			return err
+		}
 	}
 
 	response := thispb.LearnResponse{}
+	if this.chosenValue != nil {
+		response.KnowsChosenValue = proto.Bool(true)
+	}
 	message := thispb.PaxosMessage{}
 	message.LearnResponse = &response
 	errSend := msg.SendResponseProto(this.msn, header, &message)
@@ -822,67 +861,50 @@ func (this *Paxos) Dispatch(header *msgpb.Header, data []byte) error {
 	}
 }
 
-// NotifyLocalLearner updates local learner with the current vote.
-//
-// ballot: Ballot number for the vote.
-//
-// value: The voted value.
-//
-// Returns nil on success.
-func (this *Paxos) NotifyLocalLearner(ballot int64, value []byte) error {
-	if !this.IsLearner() {
+// NotifyAllLearners sends the current vote to all learners.
+func (this *Paxos) NotifyAllLearners() (status error) {
+	if !this.IsConfigured() || !this.IsAcceptor() {
 		return nil
 	}
 
-	lock, errLock := this.ctlr.Lock("learner")
-	if errLock != nil {
-		return errLock
+	defer func() {
+		if status != nil && !errs.IsClosed(status) {
+			now := time.Now()
+			next := now.Add(this.opts.LearnRetryInterval)
+			_ = this.alarm.ScheduleAt(this.uid, next, this.NotifyAllLearners)
+		}
+	}()
+
+	rlock := this.ctlr.ReadLock("acceptor", "config")
+	// Stop notifications when all learners know the consensus value.
+	if len(this.doneLearnerSet) == len(this.learnerList) {
+		rlock.Unlock()
+		return nil
 	}
-	defer lock.Unlock()
-
-	change := thispb.LearnerChange{}
-	change.VotedBallot = proto.Int64(ballot)
-	change.VotedValue = value
-	change.VotedAcceptor = proto.String(this.msn.UID())
-	return this.doUpdateLearner(&change)
-}
-
-// NotifyAllLearners sends the current vote to all learners.
-//
-// ballot: Ballot number for the vote.
-//
-// value: The voted value.
-//
-// timeout: Maximum time duration to notify all learners.
-//
-// Returns nil on success.
-func (this *Paxos) NotifyAllLearners(ballot int64, value []byte,
-	timeout time.Duration) error {
-
-	if err := this.NotifyLocalLearner(ballot, value); err != nil {
-		return err
-	}
-
-	// Make a copy of learners without the local guy.
-	self := this.msn.UID()
-	lock := this.ctlr.ReadLock("config")
-	learnerList := make([]string, 0, len(this.learnerList))
-	for _, learner := range this.learnerList {
-		if learner != self {
-			learnerList = append(learnerList, learner)
+	// Make a copy of what we need: learners and the vote map.
+	numLearners := len(this.learnerList)
+	learnerList := append([]string{}, this.learnerList...)
+	votedValueMap := make(map[int64][]byte)
+	for ballot, value := range this.votedValueMap {
+		if ackMap := this.learnerAckMap[ballot]; len(ackMap) < numLearners {
+			votedValueMap[ballot] = value
 		}
 	}
-	lock.Unlock()
+	rlock.Unlock()
 
 	request := thispb.LearnRequest{}
-	request.VotedBallot = proto.Int64(ballot)
-	request.VotedValue = value
+	for ballot, value := range votedValueMap {
+		request.VotedBallotList = append(request.VotedBallotList, ballot)
+		request.VotedValueList = append(request.VotedValueList, value)
+	}
 	message := thispb.PaxosMessage{}
 	message.LearnRequest = &request
 
 	// Send notification to all learners.
 	reqHeader := this.msn.NewRequest(this.namespace, this.uid,
 		"ClassicPaxos.Learn", this.opts.LearnTimeout)
+	defer this.msn.CloseMessage(reqHeader)
+
 	count, errSend := msg.SendAllProto(this.msn, learnerList, reqHeader,
 		&message)
 	if errSend != nil {
@@ -891,8 +913,7 @@ func (this *Paxos) NotifyAllLearners(ballot int64, value []byte,
 	}
 
 	// Wait for responses from all learners.
-	learnerSet := this.learnerAckMap[ballot]
-	for ii := 0; ii < count && len(learnerSet) < len(learnerList); ii++ {
+	for ii := 0; ii < count; ii++ {
 		message := thispb.PaxosMessage{}
 		resHeader, errRecv := msg.ReceiveProto(this.msn, reqHeader, &message)
 		if errRecv != nil {
@@ -901,28 +922,26 @@ func (this *Paxos) NotifyAllLearners(ballot int64, value []byte,
 		}
 
 		learner := resHeader.GetMessengerId()
-		if _, ok := learnerSet[learner]; ok {
-			this.Warningf("received duplicate learner response from %s (ignored)",
-				learner)
-			continue
-		}
-
 		if message.LearnResponse == nil {
-			this.Errorf("learn response from %s is empty", learner)
 			continue
 		}
+		response := message.GetLearnResponse()
 
 		// Save the learner acknowledgment to the wal.
 		change := thispb.AcceptorChange{}
-		change.AckedBallot = proto.Int64(ballot)
 		change.AckedLearner = proto.String(learner)
-		if err := this.doUpdateAcceptor(&change); err != nil {
+		if response.GetKnowsChosenValue() {
+			change.AckedChosenValue = proto.Bool(true)
+		} else {
+			for ballot := range votedValueMap {
+				change.AckedBallotList = append(change.AckedBallotList, ballot)
+			}
+		}
+		if err := this.UpdateAcceptor(&change); err != nil {
 			this.Errorf("could not update acceptor state: %v", err)
 			return err
 		}
-		learnerSet = this.learnerAckMap[ballot]
 	}
-	_ = this.msn.CloseMessage(reqHeader)
 	return nil
 }
 
@@ -1189,9 +1208,10 @@ func (this *Paxos) doUpdateConfig(change *thispb.Configuration) error {
 	if !this.wal.IsRecovering() {
 		record := thispb.WALRecord{}
 		record.ConfigChange = change
-		if _, err := wal.SyncChangeProto(this.wal, this.uid, &record); err != nil {
-			this.Errorf("could not append config change wal record: %v", err)
-			return err
+		_, errQueue := wal.QueueChangeProto(this.wal, this.uid, &record)
+		if errQueue != nil {
+			this.Errorf("could not append config change wal record: %v", errQueue)
+			return errQueue
 		}
 	}
 
@@ -1219,6 +1239,16 @@ func (this *Paxos) doUpdateProposer(change *thispb.ProposerChange) error {
 	return nil
 }
 
+func (this *Paxos) UpdateAcceptor(change *thispb.AcceptorChange) error {
+	lock, errLock := this.ctlr.Lock("acceptor")
+	if errLock != nil {
+		return errLock
+	}
+	defer lock.Unlock()
+
+	return this.doUpdateAcceptor(change)
+}
+
 func (this *Paxos) doUpdateAcceptor(change *thispb.AcceptorChange) error {
 	if !this.wal.IsRecovering() {
 		walRecord := thispb.WALRecord{}
@@ -1235,21 +1265,39 @@ func (this *Paxos) doUpdateAcceptor(change *thispb.AcceptorChange) error {
 	}
 
 	if change.VotedBallot != nil {
-		this.votedBallot = change.GetVotedBallot()
-		this.votedValue = change.GetVotedValue()
+		ballot := change.GetVotedBallot()
+		value := change.GetVotedValue()
+		this.votedBallot = ballot
+		this.votedValue = value
+		this.votedValueMap[ballot] = value
 	}
 
-	if change.AckedBallot != nil {
-		ballot := change.GetAckedBallot()
+	if change.AckedLearner != nil {
 		learner := change.GetAckedLearner()
-		learnerSet, found := this.learnerAckMap[ballot]
-		if !found {
-			learnerSet = make(map[string]struct{})
-			this.learnerAckMap[ballot] = learnerSet
+		if change.GetAckedChosenValue() {
+			this.doneLearnerSet[learner] = struct{}{}
+		} else {
+			for _, ballot := range change.GetAckedBallotList() {
+				learnerSet, found := this.learnerAckMap[ballot]
+				if !found {
+					learnerSet = make(map[string]struct{})
+					this.learnerAckMap[ballot] = learnerSet
+				}
+				learnerSet[learner] = struct{}{}
+			}
 		}
-		learnerSet[learner] = struct{}{}
 	}
 	return nil
+}
+
+func (this *Paxos) UpdateLearner(change *thispb.LearnerChange) error {
+	lock, errLock := this.ctlr.Lock("learner")
+	if errLock != nil {
+		return errLock
+	}
+	defer lock.Unlock()
+
+	return this.doUpdateLearner(change)
 }
 
 func (this *Paxos) doUpdateLearner(change *thispb.LearnerChange) error {
@@ -1260,10 +1308,10 @@ func (this *Paxos) doUpdateLearner(change *thispb.LearnerChange) error {
 	if !this.wal.IsRecovering() {
 		walRecord := thispb.WALRecord{}
 		walRecord.LearnerChange = change
-		_, errSync := wal.SyncChangeProto(this.wal, this.uid, &walRecord)
-		if errSync != nil {
-			this.Errorf("could not write learner change record: %v", errSync)
-			return errSync
+		_, errQueue := wal.QueueChangeProto(this.wal, this.uid, &walRecord)
+		if errQueue != nil {
+			this.Errorf("could not write learner change record: %v", errQueue)
+			return errQueue
 		}
 	}
 
@@ -1278,23 +1326,25 @@ func (this *Paxos) doUpdateLearner(change *thispb.LearnerChange) error {
 		return nil
 	}
 
-	votedBallot := change.GetVotedBallot()
-	votedValue := change.GetVotedValue()
-	votedAcceptor := change.GetVotedAcceptor()
-	this.ballotValueMap[votedBallot] = votedValue
-	acceptorSet, found := this.ballotAcceptorsMap[votedBallot]
-	if !found {
-		acceptorSet = make(map[string]struct{})
-		this.ballotAcceptorsMap[votedBallot] = acceptorSet
-	}
-	acceptorSet[votedAcceptor] = struct{}{}
+	acceptor := change.GetVotedAcceptor()
+	for index := range change.VotedBallotList {
+		ballot := change.VotedBallotList[index]
+		value := change.VotedValueList[index]
+		this.ballotValueMap[ballot] = value
+		acceptorSet, found := this.ballotAcceptorsMap[ballot]
+		if !found {
+			acceptorSet = make(map[string]struct{})
+			this.ballotAcceptorsMap[ballot] = acceptorSet
+		}
+		acceptorSet[acceptor] = struct{}{}
 
-	if len(acceptorSet) >= this.MajoritySize() {
-		this.chosenValue = votedValue
-		this.Infof("consensus result learned through votes is %s", votedValue)
+		if len(acceptorSet) >= this.MajoritySize() {
+			this.chosenValue = value
+			this.Infof("consensus result learned through votes is %s", value)
 
-		if this.watch != nil {
-			this.watch.ConsensusUpdate(this.uid, -1, this.chosenValue)
+			if this.watch != nil {
+				this.watch.ConsensusUpdate(this.uid, -1, this.chosenValue)
+			}
 		}
 	}
 	return nil
