@@ -48,6 +48,7 @@ var (
 	ErrOverflow = &SimpleError{Category: "ErrOverflow"}
 	ErrCorrupt  = &SimpleError{Category: "ErrCorrupt"}
 	ErrStale    = &SimpleError{Category: "ErrStale"}
+	ErrNoLeader = &SimpleError{Category: "ErrNoLeader"}
 
 	// If necessary, add new errors above and define one or more Is* functions as
 	// necessary.
@@ -66,6 +67,7 @@ func IsStopped(err error) bool  { return ErrStopped.isSimilar(err) }
 func IsOverflow(err error) bool { return ErrOverflow.isSimilar(err) }
 func IsCorrupt(err error) bool  { return ErrCorrupt.isSimilar(err) }
 func IsStale(err error) bool    { return ErrStale.isSimilar(err) }
+func IsNoLeader(err error) bool { return ErrNoLeader.isSimilar(err) }
 
 // MakeErrorFromCategory creates an error object from the name of error
 // category.
@@ -97,6 +99,8 @@ func MakeErrorFromCategory(category string) *SimpleError {
 		return ErrCorrupt
 	case "ErrStale":
 		return ErrStale
+	case "ErrNoLeader":
+		return ErrNoLeader
 	default:
 		panic(fmt.Sprint("unknown error category: %s", category))
 	}
@@ -138,6 +142,9 @@ func NewErrCorrupt(format string, args ...interface{}) error {
 	return ErrCorrupt.newErrorf(format, args...)
 }
 func NewErrStale(format string, args ...interface{}) error {
+	return ErrStale.newErrorf(format, args...)
+}
+func NewErrNoLeader(format string, args ...interface{}) error {
 	return ErrStale.newErrorf(format, args...)
 }
 

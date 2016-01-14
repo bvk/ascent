@@ -254,8 +254,8 @@ func (this *Paxos) Configure(proposerList, acceptorList,
 	}
 	defer lock.Unlock()
 
-	if this.majoritySize > 0 {
-		this.Errorf("paxos instance is already configured")
+	if this.IsConfigured() {
+		this.Errorf("this classic paxos object is already configured")
 		return errs.ErrExist
 	}
 
@@ -336,7 +336,7 @@ func (this *Paxos) RecoverCheckpoint(uid string, data []byte) error {
 
 	if walRecord.Checkpoint == nil {
 		this.Errorf("checkpoint record has no data")
-		return errs.ErrInvalid
+		return errs.ErrCorrupt
 	}
 	checkpoint := walRecord.GetCheckpoint()
 
@@ -346,7 +346,7 @@ func (this *Paxos) RecoverCheckpoint(uid string, data []byte) error {
 	if this.IsProposer() {
 		if checkpoint.ProposerState == nil {
 			this.Errorf("checkpoint record has no proposer state")
-			return errs.ErrInvalid
+			return errs.ErrCorrupt
 		}
 		this.doRestoreProposer(checkpoint.GetProposerState())
 	}
@@ -354,7 +354,7 @@ func (this *Paxos) RecoverCheckpoint(uid string, data []byte) error {
 	if this.IsAcceptor() {
 		if checkpoint.AcceptorState == nil {
 			this.Errorf("checkpoint record has no acceptor state")
-			return errs.ErrInvalid
+			return errs.ErrCorrupt
 		}
 		this.doRestoreAcceptor(checkpoint.GetAcceptorState())
 	}
@@ -462,7 +462,7 @@ func (this *Paxos) Refresh() error {
 		if len(this.doneLearnerSet) < len(this.learnerList) {
 			now := time.Now()
 			errSched := this.alarm.ScheduleAt(this.uid, now, this.NotifyAllLearners)
-			if errSched != nil {
+			if errSched != nil && !errs.IsExist(errSched) {
 				this.Errorf("could not schedule learner notifications: %v", errSched)
 				return errSched
 			}

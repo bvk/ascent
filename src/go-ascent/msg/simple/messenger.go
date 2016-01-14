@@ -612,6 +612,7 @@ func (this *Messenger) Send(targetID string, header *msgpb.Header,
 	case peer.outCh <- entry:
 		return nil
 	default:
+		this.Errorf("message is dropped due to send queue overflow")
 		return errs.ErrOverflow
 	}
 }
@@ -1042,8 +1043,6 @@ func (this *Messenger) DispatchResponse(header *msgpb.Header,
 	requestID := response.GetRequestId()
 	responseCh, found := this.requestMap[requestID]
 	if !found {
-		this.Errorf("could not find request %d to dispatch response %s",
-			requestID, header)
 		return errs.ErrNotExist
 	}
 

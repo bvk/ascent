@@ -1,0 +1,86 @@
+// Copyright (c) 2016 BVK Chaitanya
+//
+// This file is part of the Ascent Library.
+//
+// The Ascent Library is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// The Ascent Library is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with the Ascent Library.  If not, see <http://www.gnu.org/licenses/>.
+
+//
+// This file defines wal record format for paxos/classic package.
+//
+
+package ascent.paxos.multi;
+option go_package = "multi";
+
+message WALRecord {
+  optional Checkpoint checkpoint = 1;
+
+  optional Configuration config_change = 2;
+
+  optional AcceptorChange acceptor_change = 3;
+  optional CoordinatorChange coordinator_change = 4;
+}
+
+message Checkpoint {
+  required Configuration configuration = 1;
+  optional AcceptorState acceptor_state = 2;
+  optional CoordinatorState coordinator_state = 3;
+}
+
+message Configuration {
+  repeated string acceptor_list = 1;
+  repeated string coordinator_list = 2;
+  required int32 majority_size = 3;
+  required int32 concurrency = 4;
+
+  optional bool is_acceptor = 5;
+
+  optional bool is_coordinator = 6;
+  optional int32 coordinator_index = 7;
+}
+
+message AcceptorState {
+  required int64 promised_ballot = 1;
+
+  repeated int64 voted_ballot_map_keys = 2;
+  repeated int64 voted_ballot_map_values = 3;
+
+  repeated int64 voted_value_map_keys = 4;
+  repeated bytes voted_value_map_values = 5;
+}
+
+message CoordinatorState {
+  required int64 phase1_ballot = 1;
+  required int64 least_uncommitted_sequence_id = 2;
+
+  repeated int64 chosen_map_keys = 3;
+  repeated bytes chosen_map_values = 4;
+}
+
+message AcceptorChange {
+  optional int64 promised_ballot = 1;
+
+  message Vote {
+	required int64 sequence_id = 1;
+	required int64 voted_ballot = 2;
+	required bytes voted_value = 3;
+  }
+  repeated Vote vote_list = 2;
+}
+
+message CoordinatorChange {
+  optional int64 phase1_ballot = 1;
+
+  repeated int64 sequence_id_list = 2;
+  repeated bytes chosen_value_list = 3;
+}

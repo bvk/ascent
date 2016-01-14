@@ -245,11 +245,17 @@ func (this *Election) Configure(agents []string) error {
 		}
 	}
 
+	if !inCommittee {
+		this.Errorf("agent %s is not in committee %v", self, committee)
+	}
+
 	// Save configuration in the wal.
 	config := thispb.Configuration{}
 	config.CommitteeList = committee
 	config.MajoritySize = proto.Int32(int32(majoritySize))
-	config.InCommittee = proto.Bool(inCommittee)
+	if inCommittee {
+		config.InCommittee = proto.Bool(true)
+	}
 	return this.doUpdateConfig(&config)
 }
 
@@ -300,6 +306,18 @@ func (this *Election) RecoverCheckpoint(uid string, data []byte) error {
 // RecoverChange updates election state from a change record.
 func (this *Election) RecoverChange(lsn wal.LSN, uid string,
 	data []byte) error {
+
+	if lsn == nil {
+		// Forward finalize recovery record to all paxos instances.
+		for ballot, paxos := range this.classicPaxosMap {
+			if err := paxos.RecoverChange(lsn, "", data); err != nil {
+				this.Errorf("could not forward finalize recovery record to "+
+					"classic paxos instance for ballot %d", ballot)
+				return err
+			}
+		}
+		return nil
+	}
 
 	if uid != this.uid {
 		// Check if uid belongs to one of our paxos instances.
@@ -463,6 +481,10 @@ func (this *Election) ConsensusUpdate(uid string, index int64, value []byte) {
 		if err := this.doUpdateCommittee(&change); err != nil {
 			this.Fatalf("could not update committee with new election status: %v",
 				err)
+		}
+
+		if this.watch != nil {
+			this.watch.ElectionUpdate(round, winner)
 		}
 	}
 }
@@ -725,7 +747,7 @@ func (this *Election) Dispatch(header *msgpb.Header, data []byte) error {
 		return this.StatusRPC(header, message.GetStatusRequest())
 
 	default:
-		this.Errorf("unknown/invalid rpc reqest %s", header)
+		this.Errorf("unknown/invalid rpc request %s", header)
 		return errs.ErrInvalid
 	}
 }
@@ -887,7 +909,7 @@ func (this *Election) doSaveElection(state *thispb.ElectionState) {
 func (this *Election) doRestoreConfig(config *thispb.Configuration) {
 	this.committee = config.GetCommitteeList()
 	atomic.StoreInt32(&this.majoritySize, int32(config.GetMajoritySize()))
-	if config.GetInCommittee() {
+	if config.InCommittee != nil && config.GetInCommittee() {
 		atomic.StoreInt32(&this.inCommittee, 1)
 	}
 }

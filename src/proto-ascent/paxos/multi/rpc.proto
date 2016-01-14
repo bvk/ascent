@@ -1,0 +1,92 @@
+// Copyright (c) 2016 Neuverse Inc.
+// Author: bvk@neuverse.com
+//
+// This file defines rpc messages for paxos/multi package.
+
+package neuverse.paxos.multi;
+option go_package = "multi";
+
+message PaxosMessage {
+  optional StatusRequest status_request = 1;
+  optional StatusResponse status_response = 2;
+
+  optional Phase1Request phase1_request = 3;
+  optional Phase1Response phase1_response = 4;
+
+  optional Phase2Request phase2_request = 5;
+  optional Phase2Response phase2_response = 6;
+
+  optional ProposeRequest propose_request = 7;
+  optional ProposeResponse propose_response = 8;
+}
+
+message StatusRequest {
+}
+
+message StatusResponse {
+  required int64 timestamp_nsecs = 1;
+
+  // Acceptor status parameters.
+  optional int64 promised_ballot = 2;
+  optional int64 largest_voted_sequence_id = 3;
+
+  // Leader status parameters.
+  optional int64 leader_election_round = 6;
+  optional int64 leader_phase1_ballot = 7;
+  optional int64 leader_next_unused_sequence_id = 8;
+  optional int64 leader_initialize_timestamp_nsecs = 9;
+  optional int32 leader_initialize_status = 10;
+
+  // Coordinator status parameters.
+  optional int64 least_uncommitted_sequence_id = 11;
+}
+
+message Phase1Request {
+  required int64 ballot_number = 1;
+  required int64 least_uncommitted_sequence_id = 2;
+}
+
+message SequenceState {
+  required int64 sequence_id = 1;
+  required int64 voted_ballot = 2;
+  required bytes voted_value = 3;
+}
+
+message Phase1Response {
+  required int64 promised_ballot = 1;
+  repeated SequenceState sequence_state_list = 2;
+}
+
+message Phase2Request {
+  required int64 ballot_number = 1;
+  
+  repeated int64 sequence_id_list = 2;
+  repeated bytes proposed_value_list = 3;
+}
+
+message Phase2Response {
+  required int64 promised_ballot = 1;
+}
+
+message ProposeRequest {
+  // Expected beginning sequence id. If present, values can only be proposed
+  // from the given sequence id. This gives compare-and-swap semantics to the
+  // proposal.
+  optional int64 desired_sequence_id = 1;
+
+  // One or more proposed values. If more than one value is proposed, either
+  // all of them are proposed or none of them are proposed. This enables
+  // batched proposals to the multi-paxos command sequence.
+  repeated bytes proposed_value_list = 2;
+}
+
+message ProposeResponse {
+  repeated int64 sequence_id_list = 1;
+  repeated bytes chosen_value_list = 2;
+}
+
+message LearnRequest {
+}
+
+message LearnResponse {
+}

@@ -121,8 +121,8 @@ func (this *SimpleFileLog) logMessage(stderr, die bool, msgType rune,
 	// Prepare a buffer with the log message. TODO: Reuse buffers using a pool.
 	buffer := &bytes.Buffer{}
 	fmt.Fprintf(buffer,
-		"%04d-%02d-%02d %02d:%02d:%02d.%09d %c %s:%d {%s} ",
-		year, month, day, hour, minute, second, nanoseconds, msgType, fileName,
+		"%c%02d%02d%04d %02d:%02d:%02d.%09d %s:%d {%s} ",
+		msgType, day, month, year, hour, minute, second, nanoseconds, fileName,
 		line, prefix)
 	messageStart := buffer.Len()
 	hasNewline := true
