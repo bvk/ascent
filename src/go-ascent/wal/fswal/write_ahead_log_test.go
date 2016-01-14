@@ -102,6 +102,11 @@ func (this *walState) RecoverCheckpoint(uid string, data []byte) error {
 func (this *walState) RecoverChange(lsn wal.LSN, uid string,
 	data []byte) error {
 
+	if lsn == nil {
+		// End of wal recovery.
+		return nil
+	}
+
 	this.changeList = append(this.changeList, string(data))
 	return nil
 }

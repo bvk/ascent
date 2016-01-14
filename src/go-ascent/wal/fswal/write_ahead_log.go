@@ -407,11 +407,24 @@ func (this *WriteAheadLog) Recover(recoverer wal.Recoverer) error {
 		lastFileID, lastEndOffset = fileID, endOffset
 	}
 
+	// Send a special, final record to all recoverers.
+	for _, recoverer := range this.recovererMap {
+		if err := recoverer.RecoverChange(nil, "", nil); err != nil {
+			this.Errorf("could not recover the final recovery record: %v", err)
+			return err
+		}
+	}
+	if err := recoverer.RecoverChange(nil, "", nil); err != nil {
+		this.Errorf("could not recover the final recovery record: %v", err)
+		return err
+	}
+
 	this.changeFileList = changeFileList
 	if lastFileID >= 0 && lastEndOffset >= 0 {
 		this.nextChangeOffset = lastFileID + lastEndOffset
 	}
 	this.flushChangeOffset = this.nextChangeOffset
+
 	this.Infof("wal is restored to offset %d", this.nextChangeOffset)
 	return nil
 }

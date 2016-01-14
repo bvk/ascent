@@ -59,7 +59,8 @@ type WriteAheadLog interface {
 	// Recover restores state stored in the wal by calling recoverer methods
 	// repeatedly for each wal record. Recoverer is invoked with the state stored
 	// in the recent, committed checkpoint records first followed by the change
-	// records logged after checkpoint is started.
+	// records logged after checkpoint is started. All recoverers receive an
+	// empty change record with an empty uid as the final record.
 	//
 	// recoverer: User defined object that know how to restore state from the wal
 	// records. This recoverer receives the records that do not have any private
@@ -179,7 +180,10 @@ type Recoverer interface {
 	// RecoverChange function is invoked for every change record logged into the
 	// wal. If there was a successful checkpoint, only change records that were
 	// logged after the corresponding BeginCheckpoint call are recovered. All
-	// change records are recovered when no checkpoint was taken.
+	// change records are recovered when no checkpoint was taken. All recoverers
+	// recevie a final record indicating the completion of recovery with nil LSN,
+	// empty UID and nil data.
+	//
 	//
 	// lsn: A wal-local, unique, monotonically increasing logical sequence number
 	// for each change record. Since checkpoints could be aborted in the middle,
